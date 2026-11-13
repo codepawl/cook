@@ -2,8 +2,9 @@
 name = "render-native"
 version = "0.1.0"
 edition = "2021"
-description = "Hardware ray traced stills for 67js: the WGSL path tracer with ray queries on wgpu and Vulkan."
-license = "MIT"
+description = "Cook: a hardware ray traced path tracer with a Cycles-parity kernel, on wgpu and Vulkan ray queries."
+license = "MIT AND Apache-2.0 AND BSD-3-Clause"
+repository = "https://github.com/codepawl/cook"
 publish = false
 
 [lib]
