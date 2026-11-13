@@ -1,16 +1,78 @@
-# @codepawlhq/67js-render-native
+# Cook
 
-Optional. Traces a 67js scene on the GPU with hardware ray queries (wgpu, Vulkan) instead of the browser's software BVH walk. It uses the same WGSL path tracer as the browser kernel, so one seed gives the same picture. It is not a root dependency. Render jobs with `settings.renderer.backend: "native"` use it when it is installed and built, and fall back to the `gpu` backend with a note when it is not (see docs/agent-render-jobs.md).
+Cook is a path tracer for the GPU. It traces a scene with hardware ray queries (Vulkan, through wgpu) and returns linear float images, plus the albedo, normal, depth and variance of the first hit. Its `cycles` kernel follows the light transport of Blender Cycles: the Principled BSDF, the light tree, Sobol-Burley sampling, the Cycles pixel filters. Measurements against Cycles are in the [67js parity notes](https://github.com/codepawl/67.js/blob/main/docs/cycles-parity.md).
 
-Needs Rust (stable) and a Vulkan GPU with ray queries. On Windows build for MSVC; the default GNU toolchain crashes any wgpu 30 program. The DX12 backend does not report ray queries, so the addon uses Vulkan only.
+A scene reaches Cook as packed binary tables, the "FORMAT-v2" input ([FORMAT-v2.md](./FORMAT-v2.md)). The packers in this package build those tables, a `.cookpack` file stores them, and the command line renders such a file without any other code.
+
+## Requirements
+
+- Node 20.19 or newer.
+- To trace: a Vulkan adapter with ray query support, and the addon built from the Rust sources. The DX12 backend does not report ray queries, so the addon uses Vulkan only.
+- To build the addon: Rust (stable). On Windows build for MSVC; the default GNU toolchain crashes any wgpu 30 program. Cook has been built and run on Windows (MSVC) and Linux.
+
+Reading, writing and packing scenes is JavaScript only and needs neither Rust nor a GPU.
+
+## Install and build
 
 ```sh
+npm install github:codepawl/cook
+cd node_modules/@codepawlhq/cook
 npm run build   # cargo build --release, copies build/render-native.node
 ```
 
+Installing runs no script and compiles nothing. Building takes the Rust crates listed in `Cargo.lock` from crates.io. From a clone, `npm run build` in the clone does the same. `COOK_ADDON_PATH` names an addon built somewhere else; a path set there that does not exist is an error.
+
+## Command line
+
+```sh
+node bin/cook.mjs info fixtures/room.cookpack
+node bin/cook.mjs render fixtures/room.cookpack --output room.png
+node bin/cook.mjs render fixtures/room.cookpack --output room.npy --samples 256 --denoise atrous
+```
+
+`fixtures/room.cookpack` is a small room (a floor, two boxes, an emissive panel and a sky colour) made by `tools/make-fixture-pack.mjs` without any other code. After install the command is `npx cook ...`.
+
+- `cook render <scene.cookpack> --output <file.png|file.npy>` renders with the `cycles` kernel. A `.png` is 8 bit with the ACES curve and gamma 2.2 that 67js uses by default; a `.npy` is the linear float32 RGBA image, shape height x width x 4.
+- `--width`, `--height` change the size at the aspect ratio of the pack (the camera in the pack is fixed to it); `--samples`, `--max-seconds` (stops with exit code 4 and writes nothing), `--denoise none|atrous` and `--dispatch-samples` are the other options. Seed, camera and bounce limits are stored in the pack.
+- `cook info <scene.cookpack>` prints the container version, pack revision, image size, record counts and the table directory.
+- `cook --help` lists the options and the exit codes (0 done, 1 render failed, 2 wrong arguments, 3 unreadable or too new pack, 4 time limit, 5 addon not built).
+
+## JavaScript
+
 ```js
-import { buildNativeInput, traceNative } from '@codepawlhq/67js-render-native';
-import * as pack from '<engine>/src/path-tracer-gpu-pack.js';
+import { readFileSync } from 'node:fs';
+import { describeEngine, findNativeAddon, traceNative } from '@codepawlhq/cook';
+import { decodePackFile } from '@codepawlhq/cook/pack-file';
+
+if (findNativeAddon() === null) throw new Error('Build the addon first: npm run build');
+const input = decodePackFile(readFileSync('fixtures/room.cookpack'));
+const { rgba, adapter, tracedSeconds } = traceNative(input, { kernel: 'cycles', width: 160, height: 120, samples: 64 });
+console.log(describeEngine().packFormat, adapter, tracedSeconds); // rgba: linear float RGBA, rows from the top
+```
+
+`describeEngine()` (also `@codepawlhq/cook/engine`) reports the version, the pack format and revision it reads, the kernels, result passes and limits, and does not load the addon. A trace that passes `maxSeconds` throws an error with `code: 'COOK_TIME_LIMIT'` (`isTimeLimitError(error)`). `COOK_KERNEL` sets the default kernel (`JS67_NATIVE_KERNEL` is still read after it).
+
+## Pack files
+
+A `.cookpack` file holds the tables of one FORMAT-v2 input in a little-endian container: a header, a directory of named tables, a JSON metadata block (counts, pack revision) and the tables, 8-byte aligned. `encodePackFile(input)` and `decodePackFile(bytes)` in `@codepawlhq/cook/pack-file` write and read it with no Node imports; every read is bounds checked and a damaged file is refused with an error that says what is wrong. The layout is section 10 of [FORMAT-v2.md](./FORMAT-v2.md). Treat pack files from others as untrusted input ([SECURITY.md](./SECURITY.md)).
+
+The input itself comes from `buildNativeInputV2(scene, camera, options)` (`@codepawlhq/cook/pack-input-v2`), which takes either a 67js trace scene or an explicit `{ instances, materials }` descriptor, as `tools/make-fixture-pack.mjs` does. `PACK_REVISION` counts the changes that make an older input render differently; a pack file of a revision the engine does not read is refused.
+
+## 67js and the Blender add-on
+
+[67js](https://github.com/codepawl/67.js) packs its scenes with these packers and traces them through this package; it depends on one pinned commit of this repository. The Blender add-on in the 67js repository drives Cook through a 67js script and needs the addon built here, which it finds through `COOK_ADDON_PATH` or the installed package once the 67js side of this split (67js issue #898) has landed.
+
+## Licence
+
+Cook is MIT licensed ([LICENSE](./LICENSE)). The `cycles` kernel files adapt code from Blender Cycles and Open Shading Language and carry Apache-2.0 and BSD-3-Clause headers; the licence expression of the package is `MIT AND Apache-2.0 AND BSD-3-Clause`. The files, copyright holders and licence texts are in [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md) and [LICENSE-APACHE](./LICENSE-APACHE). [CONTRIBUTING.md](./CONTRIBUTING.md) says how to build and test.
+
+## Reference
+
+The sections below are the technical notes of the packages and kernel; they were written inside 67js, so some examples name its scene builders and files, linked by URL.
+
+```js
+import { buildNativeInput, traceNative } from '@codepawlhq/cook';
+import * as pack from '<67js>/src/path-tracer-gpu-pack.js';
 
 const options = { width: 1920, height: 1080, samples: 64, bounces: 8, seed: 0 };
 const input = buildNativeInput(traceScene, camera, options, pack);
@@ -19,14 +81,14 @@ const { rgba, adapter, tracedSeconds } = traceNative(input, options);
 
 `createNativeOidnDenoiser({ libraryPath, device = 'cpu', quality = 'high', cleanAux = false, threads = 0 })` opens a persistent Open Image Denoise device, four image buffers and a committed "RT" filter inside the addon. The OIDN shared library is loaded at run time from `libraryPath` (`findOidnLibrary()` of the denoise package), so the addon builds and loads without it. The object has `denoise({ width, height, color, albedo, normal })` (`albedo` optional, `normal` only with `albedo`; returns the colour and the seconds of the commit, buffer writes, execute and read), `close()` and `deviceSeconds`. The filter is recommitted only when the width, height or set of guides changes. The image goes to the device with `oidnWriteBuffer` and back with `oidnReadBuffer`, because GPU devices take no host pointers; the tracer's Vulkan buffers are not shared with CUDA. Most jobs use the wrapper `createOidnDenoiser` of `@codepawlhq/67js-denoise-oidn`.
 
-`rgba` is linear float RGBA, rows from the top, averaged over the samples. `albedo` and `normal` (three floats per pixel, normalise the normal), `depth` and `variance` (one float) are the first-hit features the wavelet and OIDN denoisers read. `pack-input.mjs` holds `buildNativeInput` without Node imports, so the job page packs the scene itself. `bench/native-tracer` compares it with the browser kernel.
+`rgba` is linear float RGBA, rows from the top, averaged over the samples. `albedo` and `normal` (three floats per pixel, normalise the normal), `depth` and `variance` (one float) are the first-hit features the wavelet and OIDN denoisers read. `pack-input.mjs` holds `buildNativeInput` without Node imports, so the job page packs the scene itself. [`bench/native-tracer`](https://github.com/codepawl/67.js/blob/main/bench/native-tracer) compares it with the browser kernel.
 
 Fog (`scene.volume`), subsurface scattering and `options.noiseThreshold` (the CPU tracer's stop rule: converged pixels draw no more samples, `averageSamples` in the result is the mean drawn) are in the kernel. `traceNative` also takes `maxSeconds` (stopping with an error once the trace has run that long) and `kernel` (`"legacy"` by default, or `"cycles"`, with `JS67_NATIVE_KERNEL` as environment fallback; see [FORMAT-v2.md](./FORMAT-v2.md)). Alpha cutouts are traced by stepping through transparent texels in the kernel (the acceleration structure is opaque). The `cycles` kernel reads a cutout's alpha through the same texture sampler as the shading, so the visible edge and the shaded colour agree for every wrap mode and filter. All textures share one pool of at most 1 GiB (the storage binding of the device); a larger set fails at `buildNativeInputV2` with the size and the limit in the message, and the fix is smaller maps.
 
 The light bake uses the texel entry of the same kernel:
 
 ```js
-import { buildNativeTexelInput, traceNativeTexels } from '@codepawlhq/67js-render-native';
+import { buildNativeTexelInput, traceNativeTexels } from '@codepawlhq/cook';
 
 const input = buildNativeTexelInput(traceScene, { texelCount, samples: 256, bounces: 3, seed: 1, fireflyClamp: 1e6 }, pack);
 const { radiance, escaped } = traceNativeTexels(input, { count: texelCount, points, normals }, { samples: 256 });
@@ -34,47 +96,47 @@ const { radiance, escaped } = traceNativeTexels(input, { count: texelCount, poin
 
 `radiance` is the mean light that reaches each texel (three floats per texel) and `escaped` the share of first rays that left the scene. The agent runtime uses it for recipe bakes (`bake.backend: "native"`).
 
-Cook's `cycles` kernel samples with Cycles' Sobol-Burley blue-noise pattern (`sampler: 'sobol-burley'`, default; `'white'` keeps the earlier hash sampler, and `'pcg'` and `'sobol'` are other names for `'white'` and `'sobol-burley'`). It picks lights through the Cycles light tree over the analytic lights, a sun and the emissive triangles (`lightSampling: 'auto'`, default: tree from more than one emitter; `'tree'`; `'uniform'` for the flat pick, and `useLightTree: true|false` is another name for `'tree'|'uniform'`). Naming an option twice with different values is an error. `envCompensation: true` (a fraction from 0 to 1 also works; off by default) subtracts the mean radiance from the environment sampling table so light sampling covers only the bright part of the map, which lowers the error under a sunny HDRI. The pixel filter is `box` unless `filterType` says otherwise. Details and measurements: [docs/cycles-parity.md](../../docs/cycles-parity.md), layout: [FORMAT-v2.md](./FORMAT-v2.md).
+Cook's `cycles` kernel samples with Cycles' Sobol-Burley blue-noise pattern (`sampler: 'sobol-burley'`, default; `'white'` keeps the earlier hash sampler, and `'pcg'` and `'sobol'` are other names for `'white'` and `'sobol-burley'`). It picks lights through the Cycles light tree over the analytic lights, a sun and the emissive triangles (`lightSampling: 'auto'`, default: tree from more than one emitter; `'tree'`; `'uniform'` for the flat pick, and `useLightTree: true|false` is another name for `'tree'|'uniform'`). Naming an option twice with different values is an error. `envCompensation: true` (a fraction from 0 to 1 also works; off by default) subtracts the mean radiance from the environment sampling table so light sampling covers only the bright part of the map, which lowers the error under a sunny HDRI. The pixel filter is `box` unless `filterType` says otherwise. Details and measurements: [docs/cycles-parity.md](https://github.com/codepawl/67.js/blob/main/docs/cycles-parity.md), layout: [FORMAT-v2.md](./FORMAT-v2.md).
 
 Four more options of the `cycles` kernel; `pathRegeneration` is on by default, the other three are off:
 
-- `pathRegeneration` (on by default; pass `false` for the earlier order) starts a pixel's next sample as soon as a path ends instead of waiting for the longest path of the dispatch. The image is bit-identical for the same dispatch sizes and sampling time was 0.63 to 0.73 times the old order on three scenes (`lit-interior`, `glass`, `many-lights-500`; `metal` 0.91 to 0.97). The legacy kernel ignores it. `bench/cycles-parity/trace-native.mjs` takes `--no-path-regeneration`.
-- `textureMips: true` (a packing option of `buildNativeInputV2`, `upgradeNativeInputV1ToV2` and the job packers; off by default) stores a mip chain after level 0 of every linearly filtered texture, float and RGBA8 alike, and the kernel reads the level a ray footprint asks for, blended between two levels, instead of always level 0. Blender Cycles reads level 0, so leave it off to match Cycles: with it off every picture is byte-identical to a build without the option. A single texture can say `mips: true` or `mips: false`. The footprint is a ray cone: the camera pixel angle, widened by 1 radian at a diffuse bounce and by twice the roughness at a glossy one, times the distance, times the UV density of the triangle. Levels cost a third more texels in the pool, which the 1 GiB check counts. The format is in `FORMAT-v2.md` section 8, the numbers in `docs/cycles-parity.md` ("Texture mip levels").
+- `pathRegeneration` (on by default; pass `false` for the earlier order) starts a pixel's next sample as soon as a path ends instead of waiting for the longest path of the dispatch. The image is bit-identical for the same dispatch sizes and sampling time was 0.63 to 0.73 times the old order on three scenes (`lit-interior`, `glass`, `many-lights-500`; `metal` 0.91 to 0.97). The legacy kernel ignores it. [`bench/cycles-parity/trace-native.mjs`](https://github.com/codepawl/67.js/blob/main/bench/cycles-parity/trace-native.mjs) takes `--no-path-regeneration`.
+- `textureMips: true` (a packing option of `buildNativeInputV2`, `upgradeNativeInputV1ToV2` and the job packers; off by default) stores a mip chain after level 0 of every linearly filtered texture, float and RGBA8 alike, and the kernel reads the level a ray footprint asks for, blended between two levels, instead of always level 0. Blender Cycles reads level 0, so leave it off to match Cycles: with it off every picture is byte-identical to a build without the option. A single texture can say `mips: true` or `mips: false`. The footprint is a ray cone: the camera pixel angle, widened by 1 radian at a diffuse bounce and by twice the roughness at a glossy one, times the distance, times the UV density of the triangle. Levels cost a third more texels in the pool, which the 1 GiB check counts. The format is in `FORMAT-v2.md` section 8, the numbers in [`docs/cycles-parity.md`](https://github.com/codepawl/67.js/blob/main/docs/cycles-parity.md) ("Texture mip levels").
 - `envCompensation: true` (or a fraction from 0 to 1) is the MIS compensation of the environment sampling table, described above. It is unbiased; it cut the error under the sunny HDRI scene by 1.4 to 2.2 times and leaves scenes without an environment unchanged.
 - `denoise: 'atrous'` also filters the image on the GPU with an edge-avoiding a-trous wavelet filter (about 1.5 ms of dispatches, 8 to 14 ms in all at 960 x 540) and returns it as `denoisedRgba` next to `rgba`, plus `denoiseSeconds`, `denoiseGpuSeconds` and `denoiseCompileSeconds`. `rgba` is untouched. The filter is biased (it smooths): never compare `denoisedRgba` with a converged image as if it were unbiased. `denoiseAtrous({ width, height, rgba, albedo, normal, depth, variance })` filters any traced image the same way.
 
-Numbers, GPU and method: [docs/cycles-parity.md](../../docs/cycles-parity.md), section "Path regeneration, environment compensation and the a-trous filter together (#897)".
+Numbers, GPU and method: [docs/cycles-parity.md](https://github.com/codepawl/67.js/blob/main/docs/cycles-parity.md), section "Path regeneration, environment compensation and the a-trous filter together (#897)".
 
 ## Depth of field (`cycles` kernel)
 
-A camera with an `fStop` is a thin lens in the `cycles` kernel, with Cycles' model. `createCamera(camera, width, height)` (from `src/path-tracer.js`) adds `apertureRadius`, `focalDistance`, `apertureBlades` and `apertureRotation` to the view it returns, and `buildNativeInput` and `buildNativeInputV2` pack them; a camera without an `fStop` is a pinhole and packs the same bytes as before.
+A camera with an `fStop` is a thin lens in the `cycles` kernel, with Cycles' model. `createCamera(camera, width, height)` (from [`src/path-tracer.js`](https://github.com/codepawl/67.js/blob/main/src/path-tracer.js)) adds `apertureRadius`, `focalDistance`, `apertureBlades` and `apertureRotation` to the view it returns, and `buildNativeInput` and `buildNativeInputV2` pack them; a camera without an `fStop` is a pinhole and packs the same bytes as before.
 
 - `fStop`: the aperture radius is `focalLength / 1000 / (2 * fStop)` metres. The focal length is `focalLength` (mm), or the one that gives `fov` on a sensor `sensorWidth` mm wide (default 36) across the image.
 - `focusDistance` (metres, along the view axis; default: the distance from eye to target).
 - `apertureBlades` (0 for a round aperture, or 3 to 64 for a regular polygon) and `apertureRotation` (degrees, Blender's sense; `createCamera` adds half a corner step, `180 / blades` degrees, because the kernel polygon sits that far from the Cycles one).
 - Lower-level: pass `apertureRadius`, `focalDistance`, `apertureBlades` or `apertureRotation` (radians) on the camera or in the pack options. Values the kernel cannot use throw a `RangeError` that names the field and what to pass.
-- The legacy kernel draws a pinhole. `bench/cycles-parity/trace-native.mjs` and `render-cycles.py` take `--f-stop`, `--focus-distance`, `--aperture-blades`, `--aperture-rotation` (degrees) and `--sensor-width`, so the same camera goes to both renderers. Layout: [FORMAT-v2.md](./FORMAT-v2.md). Measurements: [docs/cycles-parity.md](../../docs/cycles-parity.md), "Depth of field (#896, slice D1)".
+- The legacy kernel draws a pinhole. [`bench/cycles-parity/trace-native.mjs`](https://github.com/codepawl/67.js/blob/main/bench/cycles-parity/trace-native.mjs) and `render-cycles.py` take `--f-stop`, `--focus-distance`, `--aperture-blades`, `--aperture-rotation` (degrees) and `--sensor-width`, so the same camera goes to both renderers. Layout: [FORMAT-v2.md](./FORMAT-v2.md). Measurements: [docs/cycles-parity.md](https://github.com/codepawl/67.js/blob/main/docs/cycles-parity.md), "Depth of field (#896, slice D1)".
 
 ## Diffuse transmission (`cycles` kernel)
 
-A part's material takes `diffuseTransmission` (0 to 1) and `diffuseTransmissionColor` (three numbers from 0 to 1; the base colour when left out) for a thin sheet that lets diffuse light through: a curtain, a leaf, a lampshade. The weight splits the diffuse layer between the usual reflecting lobe and a cosine lobe on the far side of the surface, so a lamp behind the sheet lights its front and the specular layers keep their strength. Cycles 5.3 has no such weight on the Principled BSDF; `bench/cycles-parity/render-cycles.py` builds the same split from a Principled BSDF at `(1 - weight) * colour` plus a Translucent BSDF at `weight * colour`. A material without the field packs the tables it always did; a scene that uses it adds one extension record per material to the material table ([FORMAT-v2.md](./FORMAT-v2.md), "Material extension records"). The legacy kernel, the WebGPU and WebGL tracers and the raster renderer ignore the field. Numbers: [docs/cycles-parity.md](../../docs/cycles-parity.md), "Diffuse transmission (#1058)".
+A part's material takes `diffuseTransmission` (0 to 1) and `diffuseTransmissionColor` (three numbers from 0 to 1; the base colour when left out) for a thin sheet that lets diffuse light through: a curtain, a leaf, a lampshade. The weight splits the diffuse layer between the usual reflecting lobe and a cosine lobe on the far side of the surface, so a lamp behind the sheet lights its front and the specular layers keep their strength. Cycles 5.3 has no such weight on the Principled BSDF; [`bench/cycles-parity/render-cycles.py`](https://github.com/codepawl/67.js/blob/main/bench/cycles-parity/render-cycles.py) builds the same split from a Principled BSDF at `(1 - weight) * colour` plus a Translucent BSDF at `weight * colour`. A material without the field packs the tables it always did; a scene that uses it adds one extension record per material to the material table ([FORMAT-v2.md](./FORMAT-v2.md), "Material extension records"). The legacy kernel, the WebGPU and WebGL tracers and the raster renderer ignore the field. Numbers: [docs/cycles-parity.md](https://github.com/codepawl/67.js/blob/main/docs/cycles-parity.md), "Diffuse transmission (#1058)".
 
 ## Dispatches
 
 The Cook kernel splits a render into dispatches that each aim for about 0.5 s, sized from the time of the previous one, so a heavy scene does not run past the driver timeout and lose the device. `samplesPerDispatch` fixes the batch instead. A lost device raises an error that names the dispatch and how to lower the work per dispatch. The split is tested in `tests/dispatch.rs` (`cargo test --test dispatch`).
 
-The split does not change the image. The `cycles` kernel carries each pixel's running sums through a dispatch and adds one sample at a time in sample order, so the float32 additions into the film come in the same order whether a dispatch draws 1 sample or 64, and two renders of the same scene, seed and settings are byte-identical even when their time-sized splits differ. The `legacy` kernel draws one sample per dispatch and adds it straight to the film, so it has the same property. `tests/native-dispatch-determinism.test.js` renders with different `samplesPerDispatch` values and compares the bytes. A fixed `samplesPerDispatch` of 1 gives the same bytes as before this change; larger batches now match it instead of adding a per-dispatch partial sum.
+The split does not change the image. The `cycles` kernel carries each pixel's running sums through a dispatch and adds one sample at a time in sample order, so the float32 additions into the film come in the same order whether a dispatch draws 1 sample or 64, and two renders of the same scene, seed and settings are byte-identical even when their time-sized splits differ. The `legacy` kernel draws one sample per dispatch and adds it straight to the film, so it has the same property. [`tests/native-dispatch-determinism.test.js`](https://github.com/codepawl/67.js/blob/main/tests/native-dispatch-determinism.test.js) renders with different `samplesPerDispatch` values and compares the bytes. A fixed `samplesPerDispatch` of 1 gives the same bytes as before this change; larger batches now match it instead of adding a per-dispatch partial sum.
 
 ## Instanced scenes
 
-`buildTraceScene(parts, environment, { instancing: true, maximumTriangles })` keeps parts that share one geometry object as instances (`maximumTriangles`, up to 4,000,000, replaces the 400,000 unique triangle bound of the CPU and WebGL tracers for a scene built for this package), and `buildNativeInputV2` packs the unique triangles once with one instance record per part, for `traceNative` with `kernel: "cycles"`. The `legacy` kernel and `buildNativeInput` refuse that input and name the fix. Render jobs on the native backend send every scene to the `cycles` kernel as FORMAT-v2 tables by default, with whole materials (see "Native job materials" in [docs/cycles-parity.md](../../docs/cycles-parity.md)). The sharing rules are in [FORMAT-v2.md](./FORMAT-v2.md), the equivalence numbers against flattened in [docs/cycles-parity.md](../../docs/cycles-parity.md), section "Instancing equivalence (#896, slice I2)".
+`buildTraceScene(parts, environment, { instancing: true, maximumTriangles })` keeps parts that share one geometry object as instances (`maximumTriangles`, up to 4,000,000, replaces the 400,000 unique triangle bound of the CPU and WebGL tracers for a scene built for this package), and `buildNativeInputV2` packs the unique triangles once with one instance record per part, for `traceNative` with `kernel: "cycles"`. The `legacy` kernel and `buildNativeInput` refuse that input and name the fix. Render jobs on the native backend send every scene to the `cycles` kernel as FORMAT-v2 tables by default, with whole materials (see "Native job materials" in [docs/cycles-parity.md](https://github.com/codepawl/67.js/blob/main/docs/cycles-parity.md)). The sharing rules are in [FORMAT-v2.md](./FORMAT-v2.md), the equivalence numbers against flattened in [docs/cycles-parity.md](https://github.com/codepawl/67.js/blob/main/docs/cycles-parity.md), section "Instancing equivalence (#896, slice I2)".
 
 ## Sessions
 
 `traceNative` builds everything for each call: it opens the device handle, uploads the scene, builds the acceleration structures, compiles the kernel and allocates the film. A session keeps those on the card between frames of one scene (the `cycles` kernel only):
 
 ```js
-import { buildNativeInputV2, createNativeSession } from '@codepawlhq/67js-render-native';
+import { buildNativeInputV2, createNativeSession } from '@codepawlhq/cook';
 
 const input = buildNativeInputV2(traceScene, camera, options, pack);
 const session = createNativeSession(input, { width: 960, height: 540, samples: 64 });
@@ -91,7 +153,7 @@ A frame may change these words of the 320 byte block: the camera, lens, aperture
 
 A frame is byte-identical to the `traceNative` render of the same input and options: `traceNative` runs a session that renders once. `render` after `close()` throws, and so does a frame on a session whose device was lost; the error says to create a new session. A plain frame clears the film and starts at sample 0.
 
-A render job of many frames (`scripts/agent-native-sequence.mjs`) keeps one session for its frames: the same tables render with the frame's `kernelParams`, changed values go through `update`, and a refused or failed update, or a render the session cannot do, falls back to a new session or a one-shot trace for that frame. The job report names the route of each frame.
+A render job of many frames ([`scripts/agent-native-sequence.mjs`](https://github.com/codepawl/67.js/blob/main/scripts/agent-native-sequence.mjs)) keeps one session for its frames: the same tables render with the frame's `kernelParams`, changed values go through `update`, and a refused or failed update, or a render the session cannot do, falls back to a new session or a one-shot trace for that frame. The job report names the route of each frame.
 
 ### Progressive film
 
