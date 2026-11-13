@@ -1,5 +1,7 @@
 // Packs a trace scene into the tables the native kernel reads. It imports nothing from Node, so the job page can run it too.
 // 16 vectors: the 12 of the camera, lights and seed, the fog box and medium, and the subsurface table's first vector index.
+import { PACK_REVISION } from './pack-input-v2.mjs';
+
 const PARAMETER_BYTES = 16 * 16;
 const SUN_CONE_COSINE = Math.cos(Math.PI / 360);
 
@@ -71,6 +73,7 @@ export function buildNativeV1Tables(scene, camera, options, pack) {
     environmentTables.set(environment.pixels.data.subarray(0, environment.width * environment.height), environment.height);
   }
   return {
+    packRevision: PACK_REVISION,
     triangles: pack.packTriangles(scene).data,
     triangleCount: scene.bvh.triangleOrder.length,
     materials: materialTables.materials,

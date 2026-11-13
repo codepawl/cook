@@ -74,6 +74,27 @@ export function describeEngine() {
   };
 }
 
+/**
+ * Refuses an input packed by a packer whose revision this engine does not read, before any table is decoded or the addon
+ * is loaded. The error has `code` COOK_PACK_REVISION and names both revisions. The packers stamp `packRevision` on what
+ * they return; an input without a stamp (built by hand, or by a packer from before the stamp existed) counts as revision 1.
+ */
+export function requireReadablePackRevision(input, callerName) {
+  const stamp = input?.packRevision;
+  if (stamp !== undefined && !(Number.isInteger(stamp) && stamp >= 1)) {
+    throw new TypeError(`${callerName}: input.packRevision must be a whole number of at least 1 (the packers set it); got ${JSON.stringify(stamp)}.`);
+  }
+  const inputRevision = stamp ?? OLDEST_READABLE_PACK_REVISION;
+  if (inputRevision < OLDEST_READABLE_PACK_REVISION || inputRevision > PACK_REVISION) {
+    const advice = inputRevision > PACK_REVISION ? 'Update Cook' : 'Pack the scene again';
+    const error = new Error(
+      `${callerName}: the input has pack revision ${inputRevision}, but this Cook (${readPackageVersion()}) reads revisions ${OLDEST_READABLE_PACK_REVISION} to ${PACK_REVISION}. ${advice} (error ${COOK_PACK_REVISION_CODE}).`
+    );
+    error.code = COOK_PACK_REVISION_CODE;
+    throw error;
+  }
+}
+
 /** True for the error of a trace that passed its `maxSeconds` (`error.code` is `COOK_TIME_LIMIT`). */
 export function isTimeLimitError(error) {
   return error?.code === COOK_TIME_LIMIT_CODE;

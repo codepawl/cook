@@ -503,8 +503,8 @@ function checkInstanceTriangleRanges(input, counts) {
  * `describePackFile(bytes).packRevision` with `describeEngine().packFormat.readsRevisions`.
  */
 export function decodePackFile(bytes) {
-  const { entries, counts } = readPackFileStructure(bytes);
-  const input = { schemaVersion: FORMAT_V2_VERSION };
+  const { entries, counts, metadata } = readPackFileStructure(bytes);
+  const input = { schemaVersion: FORMAT_V2_VERSION, packRevision: metadata.packRevision };
   for (const { name, elementType, byteOffset, byteLength } of entries) {
     const absoluteOffset = bytes.byteOffset + byteOffset;
     const isAligned = absoluteOffset % elementType.bytes === 0;

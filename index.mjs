@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { withTimeLimitCode } from './engine.mjs';
+import { requireReadablePackRevision, withTimeLimitCode } from './engine.mjs';
 
 import {
   FORMAT_V2_MAGIC,
@@ -103,6 +103,7 @@ const DEFAULT_PATH_REGENERATION = true;
  * run that long. `kernel` selects `"legacy"` (default) or `"cycles"` (falling back to `JS67_NATIVE_KERNEL` when omitted).
  */
 export function traceNative(input, options = {}) {
+  requireReadablePackRevision(input, 'traceNative');
   validatePackOptions(options, 'traceNative', true);
   resolveSamplingOptions(options, 'traceNative');
   validatePathRegenerationOption(options.pathRegeneration, 'traceNative');
@@ -344,6 +345,7 @@ export function probeCyclesLobe(options = {}) {
  * `buildNativeTexelInput`.
  */
 export function traceNativeTexels(input, texels, { samples, maxSeconds }) {
+  requireReadablePackRevision(input, 'traceNativeTexels');
   validateMaxSeconds(maxSeconds, 'traceNativeTexels');
   const addon = loadAddon();
   return withTimeLimitCode(() => addon.traceTexels(input, texels, { samples, maxSeconds }));
@@ -423,6 +425,7 @@ export function resolveSessionCreation(input, options, callerName = 'createNativ
       `${callerName}: \`input.schemaVersion\` must be ${FORMAT_V2_VERSION} (a FORMAT-v2 input from buildNativeInputV2); got ${JSON.stringify(input.schemaVersion)}. Convert a v1 input with upgradeNativeInputV1ToV2.`
     );
   }
+  requireReadablePackRevision(input, callerName);
   requireSessionKernelParams(input.kernelParams, callerName);
   if (options === null || typeof options !== 'object') {
     throw new TypeError(`${callerName}: \`options\` must be an object.`);

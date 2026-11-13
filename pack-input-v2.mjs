@@ -2762,6 +2762,7 @@ export function buildNativeInputV2(scene, camera, options = {}) {
 
   return {
     schemaVersion: FORMAT_V2_VERSION,
+    packRevision: PACK_REVISION,
     kernelParams,
     instances: packedGeometry.instances,
     instanceCount: counts.instanceCount,
@@ -3258,6 +3259,7 @@ export function upgradeNativeInputV1ToV2(v1Input, options = {}, carriedFields = 
 
   return {
     schemaVersion: FORMAT_V2_VERSION,
+    packRevision: PACK_REVISION,
     kernelParams,
     instances: instancesBuffer,
     instanceCount: counts.instanceCount,
