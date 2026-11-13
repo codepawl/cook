@@ -17,6 +17,12 @@ export const FORMAT_V2_MAGIC = 0x36375054;
 export const FORMAT_V2_VERSION = 2;
 export const INVALID_INDEX_V2 = 0xffffffff;
 
+// The revision of what this packer writes inside FORMAT_V2_VERSION 2. Bump it by one when a change makes an input packed
+// before it render differently or fail on the host (a field changes meaning, a table gains required content, a flag changes
+// its default). A change that old inputs still render correctly under does not bump it. The pack file, the engine
+// description (`describeEngine().packFormat`) and the host's revision check all read this one constant.
+export const PACK_REVISION = 1;
+
 // Byte offset of `filter_glossy` inside a `KernelParamsV2` buffer (u32[75] * 4 = 300).
 // Used in `packKernelParamsV2` and in `index.mjs` when patching a pre-built buffer.
 export const KERNEL_PARAMS_V2_FILTER_GLOSSY_BYTE_OFFSET = 300;

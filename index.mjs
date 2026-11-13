@@ -1,13 +1,16 @@
-// Hardware ray traced stills for 67js: loads the native addon built by `npm run build` and traces a packed scene on the
-// GPU with Vulkan ray queries. The addon is not in this package; without it `findNativeAddon()` returns null.
+// Cook: loads the native addon built by `npm run build` and traces a packed scene on the GPU with Vulkan ray queries.
+// The addon is not in the npm package; without it `findNativeAddon()` returns null.
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { withTimeLimitCode } from './engine.mjs';
 
 import {
   FORMAT_V2_MAGIC,
   FORMAT_V2_VERSION,
+  PACK_REVISION,
   STRUCT_STRIDES_V2,
   KERNEL_FLAG_USE_LIGHT_TREE,
   KERNEL_FLAG_WHITE_NOISE_SAMPLER,
@@ -32,8 +35,15 @@ import {
 
 export { buildNativeInput, buildNativeTexelInput } from './pack-input.mjs';
 export {
+  describeEngine,
+  isTimeLimitError,
+  COOK_TIME_LIMIT_CODE,
+  COOK_PACK_REVISION_CODE,
+} from './engine.mjs';
+export {
   FORMAT_V2_MAGIC,
   FORMAT_V2_VERSION,
+  PACK_REVISION,
   STRUCT_STRIDES_V2,
   KERNEL_PARAMS_V2_FILTER_GLOSSY_BYTE_OFFSET,
   buildNativeInputV2,
@@ -45,22 +55,40 @@ const PACKAGE_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const ADDON_PATH = join(PACKAGE_DIRECTORY, 'build', 'render-native.node');
 const VALID_KERNELS = new Set(['legacy', 'cycles']);
 
-/** The path of the built addon, or null when `npm run build` has not run. */
+/**
+ * The path of the built addon, or null when `npm run build` has not run. `COOK_ADDON_PATH` names an addon built elsewhere
+ * (another checkout, the Blender add-on); a path set there that does not exist is an error, not a silent fallback.
+ */
 export function findNativeAddon() {
+  const overridePath = process.env.COOK_ADDON_PATH;
+  if (overridePath !== undefined && overridePath !== '') {
+    if (!existsSync(overridePath)) {
+      throw new Error(
+        `COOK_ADDON_PATH is set to ${JSON.stringify(overridePath)}, which does not exist. Point it at a built render-native.node (npm run build makes build/render-native.node) or unset the variable.`
+      );
+    }
+    return resolve(overridePath);
+  }
   return existsSync(ADDON_PATH) ? ADDON_PATH : null;
 }
 
+function kernelFromEnvironment() {
+  for (const variableName of ['COOK_KERNEL', 'JS67_NATIVE_KERNEL']) {
+    const value = process.env[variableName];
+    if (value !== undefined && value !== '') return value;
+  }
+  return undefined;
+}
+
 /**
- * Resolves and validates the native kernel name from `kernel`, falling back to `JS67_NATIVE_KERNEL` and `'legacy'`.
+ * Resolves and validates the native kernel name from `kernel`, falling back to `COOK_KERNEL`, then `JS67_NATIVE_KERNEL`,
+ * then `'legacy'`.
  */
 export function resolveNativeKernel(kernel) {
-  const envKernel = process.env.JS67_NATIVE_KERNEL;
-  const selectedKernel = kernel !== undefined
-    ? kernel
-    : (envKernel !== undefined && envKernel !== '' ? envKernel : 'legacy');
+  const selectedKernel = kernel ?? kernelFromEnvironment() ?? 'legacy';
   if (typeof selectedKernel !== 'string' || !VALID_KERNELS.has(selectedKernel)) {
     throw new Error(
-      `Invalid native kernel ${JSON.stringify(selectedKernel)}: pass "legacy" or "cycles" in options.kernel or JS67_NATIVE_KERNEL.`
+      `Invalid native kernel ${JSON.stringify(selectedKernel)}: pass "legacy" or "cycles" in options.kernel , COOK_KERNEL or JS67_NATIVE_KERNEL.`
     );
   }
   return selectedKernel;
@@ -90,10 +118,10 @@ export function traceNative(input, options = {}) {
         'Cannot pass a FORMAT-v2 scene input to kernel "legacy": pass kernel "cycles" or build a v1 input with buildNativeInput (an instanced scene needs kernel "cycles"; build it without { instancing: true } for kernel "legacy").'
       );
     }
-    return addon.traceScene(input, { width, height, samples, maxSeconds, kernel: selectedKernel });
+    return withTimeLimitCode(() => addon.traceScene(input, { width, height, samples, maxSeconds, kernel: selectedKernel }));
   }
   const v2Input = prepareCyclesInput(input, options);
-  return addon.traceSceneCycles(v2Input, {
+  return withTimeLimitCode(() => addon.traceSceneCycles(v2Input, {
     width,
     height,
     samples,
@@ -101,7 +129,7 @@ export function traceNative(input, options = {}) {
     maxSeconds,
     bootstrapKernel,
     denoise,
-  });
+  }));
 }
 
 /**
@@ -134,7 +162,7 @@ export function createNativeOidnDenoiser({ libraryPath, device = 'cpu', quality 
   }
   const addon = loadAddon();
   if (typeof addon.OidnDenoiser !== 'function') {
-    throw new Error('The built native tracer has no OIDN support: run `npm run build` in packages/render-native again.');
+    throw new Error('The built native tracer has no OIDN support: run `npm run build` in the Cook package again.');
   }
   return new addon.OidnDenoiser({ libraryPath, device, quality, cleanAux, threads });
 }
@@ -297,7 +325,8 @@ export function probeCyclesLobe(options = {}) {
       textureCount,
     });
 
-  return loadAddon().probeCyclesLobe({
+  const addon = loadAddon();
+  return withTimeLimitCode(() => addon.probeCyclesLobe({
     width,
     height,
     kernelParams,
@@ -306,7 +335,7 @@ export function probeCyclesLobe(options = {}) {
     textureTexels: options.textureTexels,
     maxSeconds: options.maxSeconds,
     bootstrapKernel: options.bootstrapKernel,
-  });
+  }));
 }
 
 /**
@@ -316,12 +345,13 @@ export function probeCyclesLobe(options = {}) {
  */
 export function traceNativeTexels(input, texels, { samples, maxSeconds }) {
   validateMaxSeconds(maxSeconds, 'traceNativeTexels');
-  return loadAddon().traceTexels(input, texels, { samples, maxSeconds });
+  const addon = loadAddon();
+  return withTimeLimitCode(() => addon.traceTexels(input, texels, { samples, maxSeconds }));
 }
 
 function loadAddon() {
   const addonPath = findNativeAddon();
-  if (!addonPath) throw new Error('The native tracer is not built. Run `npm run build` in packages/render-native.');
+  if (!addonPath) throw new Error('The native tracer is not built. Run `npm run build` in the Cook package, or set COOK_ADDON_PATH to a built render-native.node.');
   return createRequire(import.meta.url)(addonPath);
 }
 
@@ -519,7 +549,7 @@ export function wrapNativeSession(nativeSession, sessionInput, sessionOptions) {
     render(renderOptions = {}) {
       requireOpen('render');
       const frame = resolveSessionFrame(heldInput, sessionOptions, renderOptions);
-      const { trace, session } = nativeSession.render(frame);
+      const { trace, session } = withTimeLimitCode(() => nativeSession.render(frame));
       return { ...trace, ...session };
     },
     reset() {
@@ -578,7 +608,7 @@ export function createNativeSession(input, options = {}) {
   const sessionInput = resolveSessionCreation(input, options);
   const addon = loadAddon();
   if (typeof addon.NativeCyclesSession !== 'function') {
-    throw new Error('The built native addon has no session support. Run `npm run build` in packages/render-native.');
+    throw new Error('The built native addon has no session support. Run `npm run build` in the Cook package.');
   }
   return wrapNativeSession(new addon.NativeCyclesSession(sessionInput), sessionInput, options);
 }
