@@ -4,8 +4,8 @@
 mod cycles;
 mod host;
 
-use napi::bindgen_prelude::{Float32Array, Uint32Array, Uint8Array};
-use napi::Result;
+use napi::bindgen_prelude::{Float32Array, Object, Uint32Array, Uint8Array};
+use napi::{Env, Result};
 use napi_derive::napi;
 
 use crate::host::denoise::{atrous_denoise, DenoiseInput};
@@ -19,8 +19,16 @@ use crate::host::cycles_session::{
 };
 use crate::host::cycles_update::UpdatableTable;
 use crate::host::session::{
-    get_cached_device, prepare_scene, run_cycles_lobe_probe, trace_samples, CyclesTrace, JobShape,
+    get_cached_device, note_environment_closing, note_environment_loaded, prepare_scene, run_cycles_lobe_probe, trace_samples, CyclesTrace, JobShape,
 };
+
+/// Registers the shutdown step that destroys the GPU device before the process exits (see `note_environment_closing`).
+#[napi(module_exports)]
+pub fn register_exit_cleanup(_exports: Object, env: Env) -> Result<()> {
+    note_environment_loaded();
+    env.add_env_cleanup_hook((), |()| note_environment_closing())?;
+    Ok(())
+}
 
 const KERNEL_SOURCE: &str = include_str!("kernel.wgsl");
 /// The texel entry point of the light bake, appended to the kernel for a bake only.
@@ -86,6 +94,9 @@ pub struct NativeCyclesTraceOptions {
     pub height: u32,
     pub samples: u32,
     pub samples_per_dispatch: Option<u32>,
+    /// The longest one dispatch may run in milliseconds; the frame is cut into pixel tiles and sample batches to fit it.
+    /// Absent keeps whole-image dispatches of about half a second.
+    pub dispatch_budget_ms: Option<f64>,
     pub max_seconds: Option<f64>,
     pub bootstrap_kernel: Option<bool>,
     /// `"none"` (default) or `"atrous"`: also filter the image with the edge-avoiding a-trous wavelet filter.
@@ -188,6 +199,11 @@ pub struct NativeTraceResult {
     pub samples_per_dispatch: Option<u32>,
     /// The longest single dispatch in seconds, measured when dispatches are sized by time (absent for a fixed batch).
     pub longest_dispatch_seconds: Option<f64>,
+    /// How many dispatches the samples were drawn in (Cycles kernel only).
+    pub dispatch_count: Option<u32>,
+    /// With `dispatchBudgetMs`: the pixels inside the image of the smallest and the largest tile one dispatch covered.
+    pub smallest_tile_pixels: Option<u32>,
+    pub largest_tile_pixels: Option<u32>,
     pub adapter: String,
     pub backend: String,
     /// "EXPERIMENTAL_RAY_QUERY" when the device the trace ran on was opened with ray queries (the tracer needs them).
@@ -260,6 +276,9 @@ pub fn trace_scene(input: NativeTraceInput, options: NativeTraceOptions) -> Resu
         average_samples: resolved.average_samples,
         samples_per_dispatch: None,
         longest_dispatch_seconds: None,
+        dispatch_count: None,
+        smallest_tile_pixels: None,
+        largest_tile_pixels: None,
         adapter: prepared.adapter_name,
         backend: prepared.backend_name,
         features: prepared.features,
@@ -341,6 +360,7 @@ fn render_session_frame(
         height: options.height,
         samples: options.samples,
         samples_per_dispatch: options.samples_per_dispatch,
+        dispatch_budget_ms: options.dispatch_budget_ms,
         max_seconds: options.max_seconds,
         bootstrap_kernel: options.bootstrap_kernel.unwrap_or(false),
         kernel_params: options.kernel_params.as_deref(),
@@ -395,6 +415,9 @@ fn session_render_result(
         average_samples: resolved.average_samples,
         samples_per_dispatch: (render.trace.largest_batch > 0).then_some(render.trace.largest_batch),
         longest_dispatch_seconds: render.trace.longest_dispatch_seconds,
+        dispatch_count: (render.trace.dispatch_count > 0).then_some(render.trace.dispatch_count),
+        smallest_tile_pixels: render.trace.smallest_tile_pixels.map(|pixels| pixels as u32),
+        largest_tile_pixels: render.trace.largest_tile_pixels.map(|pixels| pixels as u32),
         adapter: context.adapter_name.clone(),
         backend: context.backend_name.clone(),
         features: context.features.clone(),
@@ -422,7 +445,12 @@ fn resolve_session_film(session: &mut CyclesSession, options: &NativeSessionReso
     let film = session.read_film()?;
     let film_samples = film.film_samples;
     let render = CyclesRender {
-        trace: CyclesTrace { sums: film.sums, traced_seconds: 0.0, largest_batch: 0, longest_dispatch_seconds: None },
+        trace: CyclesTrace { sums: film.sums, traced_seconds: 0.0, largest_batch: 0,
+            longest_dispatch_seconds: None,
+            dispatch_count: 0,
+            smallest_tile_pixels: None,
+            largest_tile_pixels: None,
+        },
         report: CyclesRenderReport {
             setup_seconds: 0.0,
             compile_seconds: 0.0,
