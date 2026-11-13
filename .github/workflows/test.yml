@@ -42,7 +42,7 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
       - run: cargo build --release --locked
-      - run: node tools/cargo-test.mjs
+      - run: node tools/run-cargo-tests.mjs
 
   # The Cycles lookup tables in luts.rs equal the tables they replaced. Needs the whole history.
   luts:

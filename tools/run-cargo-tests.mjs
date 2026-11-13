@@ -1,6 +1,6 @@
 // Runs the Rust tests of the addon crate. The crate is a Node addon, so its napi symbols are only resolved when Node loads
 // the library; a test binary on Linux must therefore link with them left unresolved, which these flags allow.
-//   node tools/cargo-test.mjs [extra cargo test arguments]
+//   node tools/run-cargo-tests.mjs [extra cargo test arguments]
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
