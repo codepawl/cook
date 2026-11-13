@@ -7,7 +7,7 @@ Node 20.19 or newer. Rust (stable) and a Vulkan adapter with ray queries are nee
 ```sh
 node --test              # pure JavaScript tests; the GPU tests in tests/gpu skip when the addon is not built
 node build.mjs           # cargo build --release, copies build/render-native.node (needs Rust)
-cargo test               # the Rust unit tests and tests/dispatch.rs
+node tools/cargo-test.mjs # the Rust unit tests and tests/dispatch.rs (cargo test with the link flags a Node addon needs on Linux)
 node --test              # again, now the GPU tests run too
 ```
 
