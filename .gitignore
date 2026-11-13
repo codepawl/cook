@@ -1,2 +1,9 @@
 target/
 build/
+node_modules/
+artifacts/
+*.node
+*.log
+.env
+.env.*
+*.tgz
