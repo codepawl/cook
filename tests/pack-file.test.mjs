@@ -21,7 +21,7 @@ const TABLE_NAMES = [
   'lightTreeEmitters', 'lightToTree', 'textureDescriptors', 'textureTexels', 'environmentTexels',
 ];
 const COUNT_NAMES = [
-  'instanceCount', 'triangleCount', 'materialCount', 'emissiveTriangleCount', 'lightCount', 'lightTreeNodeCount',
+  'instanceCount', 'triangleCount', 'materialCount', 'emissiveTriangleCount', 'lightCount', 'portalCount', 'lightTreeNodeCount',
   'lightTreeEmitterCount', 'textureCount',
 ];
 
@@ -258,6 +258,13 @@ test('decoding refuses counts that disagree with the table sizes or with kernelP
     () => decodePackFile(withEntryField(bytes, 'lightToTree', 48, 4)),
     /"lightToTree" holds 4 bytes but lightCount \+ emissiveTriangleCount is 2/,
   );
+  const portalsBeyondTable = buildRoomInput();
+  portalsBeyondTable.portalCount = 1000;
+  expectPackFileError(() => encodePackFile(portalsBeyondTable), /portalCount is 1000 but table "lights" holds/);
+  const portalsNotInKernelParams = buildRoomInput();
+  portalsNotInKernelParams.lights = new Uint8Array(portalsNotInKernelParams.lights.byteLength + 4096);
+  portalsNotInKernelParams.portalCount = 1;
+  expectPackFileError(() => encodePackFile(portalsNotInKernelParams), /portalCount is 1 in the metadata but 0 in kernelParams/);
   const mismatched = buildRoomInput();
   mismatched.materialCount = 3;
   expectPackFileError(() => encodePackFile(mismatched), /materialCount is 3 in the metadata but 4 in kernelParams/);

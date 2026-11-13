@@ -444,7 +444,7 @@ A JSON object with these members, in this order:
 | :--- | :--- |
 | `schemaVersion` | `2`, the `schemaVersion` of the input (`FORMAT_V2_VERSION`) |
 | `packRevision` | The pack revision of the packer that wrote the input (`PACK_REVISION` in `pack-input-v2.mjs`) |
-| `counts` | `instanceCount`, `triangleCount`, `materialCount`, `emissiveTriangleCount`, `lightCount`, `lightTreeNodeCount`, `lightTreeEmitterCount` (`null` when the emitter tables are absent) and `textureCount`, each a whole number from `0` to `4294967295` |
+| `counts` | `instanceCount`, `triangleCount`, `materialCount`, `emissiveTriangleCount`, `lightCount`, `portalCount` (the light portals stored after the `lightCount` emitters in `lights`), `lightTreeNodeCount`, `lightTreeEmitterCount` (`null` when the emitter tables are absent) and `textureCount`, each a whole number from `0` to `4294967295` |
 | `extra` | Optional: whatever JSON object the writer was given (for example the name of the program that exported the scene) |
 
 The image size and the sample count are not repeated here: read them from `kernelParams` (`width` and `height` at `u32[2]` and `u32[3]`, the sample count at `u32[6]`). `cook render` takes its defaults from there.
@@ -459,7 +459,7 @@ A reader refuses a file, with an error that says what is wrong and carries `code
 - a table starts before the end of the metadata or at an offset that is not a multiple of 8, or its length is not a multiple of its element size, or two tables with a non-zero length share bytes (a table of length `0` may sit at any aligned offset);
 - a required table is missing, or only some of the light tree emitter tables are present;
 - the metadata is not valid JSON, `schemaVersion` is not `2`, `packRevision` is not a whole number of at least `1`, or a count is missing or out of range;
-- a table is smaller than its count times the stride of `STRUCT_STRIDES_V2` (`kernelParams` must be exactly `320` bytes, `lightToTree` needs `4 * (lightCount + emissiveTriangleCount)` bytes, `lightTreeEmitters` has a `32` byte stride), or a count differs from the same count inside `kernelParams` (`u32[21]` to `u32[27]`), or `kernelParams` does not begin with `FORMAT_V2_MAGIC` and `FORMAT_V2_VERSION`.
+- a table is smaller than its count times the stride of `STRUCT_STRIDES_V2` (`kernelParams` must be exactly `320` bytes, `lightToTree` needs `4 * (lightCount + emissiveTriangleCount)` bytes, `lightTreeEmitters` has a `32` byte stride), or `lights` is smaller than `lightCount + portalCount` records, or a count differs from the same count inside `kernelParams` (`u32[21]` to `u32[27]`, and `u32[77]` for `portalCount`), or `kernelParams` does not begin with `FORMAT_V2_MAGIC` and `FORMAT_V2_VERSION`.
 
 `decodePackFile` (not `describePackFile`) also checks the record fields that index another table, so a damaged file fails with a message instead of rendering garbage:
 

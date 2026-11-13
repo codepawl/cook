@@ -20,6 +20,7 @@ const KERNEL_PARAMS_COUNT_WORDS = {
   lightCount: 25,
   lightTreeNodeCount: 26,
   textureCount: 27,
+  portalCount: 77,
 };
 
 const ELEMENT_TYPES = {
@@ -52,6 +53,7 @@ const COUNT_NAMES = [
   'materialCount',
   'emissiveTriangleCount',
   'lightCount',
+  'portalCount',
   'lightTreeNodeCount',
   'lightTreeEmitterCount',
   'textureCount',
@@ -96,8 +98,12 @@ function checkCountsAgainstTables(counts, tableByteLengths, kernelParams, caller
   }
   for (const spec of TABLE_SPECS) {
     if (spec.countName === undefined || !tableByteLengths.has(spec.name)) continue;
-    const requiredBytes = counts[spec.countName] * spec.stride;
     const actualBytes = tableByteLengths.get(spec.name);
+    if (spec.name === 'lights') {
+      checkLightsHoldPortals(counts, actualBytes, spec.stride, callerName);
+      continue;
+    }
+    const requiredBytes = counts[spec.countName] * spec.stride;
     if (actualBytes < requiredBytes) {
       throw new PackFileError(
         `${callerName}: ${spec.countName} is ${counts[spec.countName]} but table "${spec.name}" holds ${actualBytes} bytes; ${counts[spec.countName]} records of ${spec.stride} bytes need at least ${requiredBytes}.`
@@ -114,6 +120,17 @@ function checkCountsAgainstTables(counts, tableByteLengths, kernelParams, caller
     }
   }
   checkKernelParams(counts, kernelParams, tableByteLengths.get('kernelParams'), callerName);
+}
+
+// The light table holds the emitters and then the portals (FORMAT-v2.md, section 6).
+function checkLightsHoldPortals(counts, actualBytes, stride, callerName) {
+  const recordCount = counts.lightCount + counts.portalCount;
+  const requiredBytes = recordCount * stride;
+  if (actualBytes < requiredBytes) {
+    throw new PackFileError(
+      `${callerName}: lightCount is ${counts.lightCount} and portalCount is ${counts.portalCount} but table "lights" holds ${actualBytes} bytes; ${recordCount} records of ${stride} bytes need at least ${requiredBytes}.`
+    );
+  }
 }
 
 function checkKernelParams(counts, kernelParams, kernelParamsByteLength, callerName) {
