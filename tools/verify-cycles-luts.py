@@ -1,9 +1,9 @@
 """Checks that the Cycles lookup tables in src/cycles/luts.rs equal the inline WGSL switch tables they replaced, word for word.
 
-Usage: uv run --no-project python packages/render-native/tools/verify-cycles-luts.py [reference-commit]
+Usage: uv run --no-project python tools/verify-cycles-luts.py [reference-commit]
 
 The reference commit is the last one whose bsdf_glass.wgsl, bsdf_microfacet.wgsl and closure.wgsl still carry the
-tables inline (default 27ab0de0, the parent of the change that moved them into luts.rs). Those tables were translated
+tables inline (default 4459bdfb56d70fdcabc893e421da2b25c09a6485, the parent of the commit "Add Cycles LUT binding, kernel specialization, and device/pipeline caching (#894)" that moved them into luts.rs; the repository history must be present, so clone without --depth). Those tables were translated
 from the Cycles kernel lookup tables, so a match proves luts.rs holds the same numbers. Prints one line per table and
 ends with ALL IDENTICAL or MISMATCH; the exit code is 0 only for ALL IDENTICAL.
 """
@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-DEFAULT_REFERENCE_COMMIT = "27ab0de0"
+DEFAULT_REFERENCE_COMMIT = "4459bdfb56d70fdcabc893e421da2b25c09a6485"
 PACKAGE_DIRECTORY = Path(__file__).resolve().parent.parent
 CYCLES_DIRECTORY = PACKAGE_DIRECTORY / "src" / "cycles"
 TOTAL_WORDS = 29712
