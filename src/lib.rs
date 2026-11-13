@@ -38,7 +38,7 @@ pub struct NativeTraceInput {
     pub atlas: Uint32Array,
     pub environment_colors: Float32Array,
     pub environment_tables: Float32Array,
-    /// The 16 vec4 parameter block of `packages/render-native/pack-input.mjs`, as bytes.
+    /// The 16 vec4 parameter block of `pack-input.mjs`, as bytes.
     pub parameters: Uint8Array,
 }
 

@@ -6,7 +6,7 @@
  * Lookup tables translated from Open Shading Language and Blender Cycles (kernel/closure/bsdf_microfacet.h,
  * kernel/closure/bsdf_sheen.h, kernel/util/lookup_table.h) through the inline WGSL tables of bsdf_glass.wgsl,
  * bsdf_microfacet.wgsl and closure.wgsl. Do not edit by hand.
- * `uv run --no-project python packages/render-native/tools/verify-cycles-luts.py` checks that every word equals those
+ * `uv run --no-project python tools/verify-cycles-luts.py` checks that every word equals those
  * original tables (read from the commit before they moved here) and prints ALL IDENTICAL. */
 
 /// Static LUT words uploaded to `@group(0) @binding(12)` as a read-only storage buffer.
