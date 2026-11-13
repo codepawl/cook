@@ -415,6 +415,87 @@ export function describePackFile(bytes) {
   };
 }
 
+const TEXTURE_WORDS_PER_TEXEL = [1, 1, 4, 1];
+
+// Words one texture occupies in textureTexels: its mip chain without the final padding (FORMAT-v2.md section 8).
+function textureExtentInWords(width, height, formatAndSampler) {
+  const wordsPerTexel = TEXTURE_WORDS_PER_TEXEL[formatAndSampler & 0xff] ?? 1;
+  const mipCount = Math.max(1, (formatAndSampler >>> 8) & 0xff);
+  let words = 0;
+  for (let level = 0; level < mipCount; level++) {
+    words += Math.max(1, Math.floor(width / 2 ** level)) * Math.max(1, Math.floor(height / 2 ** level)) * wordsPerTexel;
+  }
+  return words;
+}
+
+function viewOf(table) {
+  return new DataView(table.buffer, table.byteOffset, table.byteLength);
+}
+
+function checkTextureDescriptors(input, counts) {
+  const descriptors = viewOf(input.textureDescriptors);
+  const texelWords = input.textureTexels.length;
+  for (let index = 0; index < counts.textureCount; index++) {
+    const start = index * STRUCT_STRIDES_V2.textureDescriptor;
+    const dataOffset = descriptors.getUint32(start, true);
+    const width = descriptors.getUint32(start + 4, true);
+    const height = descriptors.getUint32(start + 8, true);
+    const end = dataOffset + textureExtentInWords(width, height, descriptors.getUint32(start + 12, true));
+    if (end > texelWords) {
+      throw new PackFileError(
+        `decodePackFile: texture descriptor ${index} (${width} x ${height} at word ${dataOffset}) needs words up to ${end} but table "textureTexels" holds ${texelWords}.`
+      );
+    }
+  }
+}
+
+function checkLightTree(input, counts) {
+  if (input.lightToTree === undefined) return;
+  const emitterCount = counts.lightTreeEmitterCount;
+  const unifiedEmitterCount = counts.lightCount + counts.emissiveTriangleCount;
+  for (let index = 0; index < unifiedEmitterCount; index++) {
+    if (input.lightToTree[index] >= emitterCount) {
+      throw new PackFileError(
+        `decodePackFile: lightToTree[${index}] is ${input.lightToTree[index]} but lightTreeEmitterCount is ${emitterCount}; an emitter slot must be below it.`
+      );
+    }
+  }
+  const nodes = viewOf(input.lightTreeNodes);
+  for (let index = 0; index < counts.lightTreeNodeCount; index++) {
+    const start = index * STRUCT_STRIDES_V2.lightTreeNode;
+    const leftChild = nodes.getInt32(start + 48, true);
+    const rightOrFirstEmitter = nodes.getUint32(start + 52, true);
+    if (leftChild >= 0) {
+      if (leftChild >= counts.lightTreeNodeCount || rightOrFirstEmitter >= counts.lightTreeNodeCount) {
+        throw new PackFileError(
+          `decodePackFile: light tree node ${index} has children ${leftChild} and ${rightOrFirstEmitter} but lightTreeNodeCount is ${counts.lightTreeNodeCount}.`
+        );
+      }
+    } else {
+      const leafEmitterCount = nodes.getUint32(start + 56, true) & 0xffff;
+      if (rightOrFirstEmitter + leafEmitterCount > emitterCount) {
+        throw new PackFileError(
+          `decodePackFile: light tree leaf ${index} lists emitter slots ${rightOrFirstEmitter} to ${rightOrFirstEmitter + leafEmitterCount} but lightTreeEmitterCount is ${emitterCount}.`
+        );
+      }
+    }
+  }
+}
+
+function checkInstanceTriangleRanges(input, counts) {
+  const instances = viewOf(input.instances);
+  for (let index = 0; index < counts.instanceCount; index++) {
+    const start = index * STRUCT_STRIDES_V2.instance;
+    const triangleOffset = instances.getUint32(start + 100, true);
+    const totalTriangleCount = instances.getUint32(start + 108, true);
+    if (triangleOffset + totalTriangleCount > counts.triangleCount) {
+      throw new PackFileError(
+        `decodePackFile: instance ${index} covers triangles ${triangleOffset} to ${triangleOffset + totalTriangleCount} but triangleCount is ${counts.triangleCount}.`
+      );
+    }
+  }
+}
+
 /**
  * Reads a pack file and returns the FORMAT-v2 input object that `traceNative(input, { kernel: "cycles" })` takes. Tables
  * that are 4-byte aligned in `bytes` are views into it; the others are copies. Throws a `PackFileError` (code
@@ -438,5 +519,8 @@ export function decodePackFile(bytes) {
   for (const [countName, value] of Object.entries(counts)) {
     if (value !== null) input[countName] = value;
   }
+  checkInstanceTriangleRanges(input, counts);
+  checkLightTree(input, counts);
+  checkTextureDescriptors(input, counts);
   return input;
 }

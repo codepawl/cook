@@ -453,6 +453,15 @@ A reader refuses a file, with an error that says what is wrong and carries `code
 - the metadata is not valid JSON, `schemaVersion` is not `2`, `packRevision` is not a whole number of at least `1`, or a count is missing or out of range;
 - a table is smaller than its count times the stride of `STRUCT_STRIDES_V2` (`kernelParams` must be exactly `320` bytes, `lightToTree` needs `4 * (lightCount + emissiveTriangleCount)` bytes, `lightTreeEmitters` has a `32` byte stride), or a count differs from the same count inside `kernelParams` (`u32[21]` to `u32[27]`), or `kernelParams` does not begin with `FORMAT_V2_MAGIC` and `FORMAT_V2_VERSION`.
 
+`decodePackFile` (not `describePackFile`) also checks the record fields that index another table, so a damaged file fails with a message instead of rendering garbage:
+
+- a texture descriptor's `data_offset` plus the words of its mip chain (`width` x `height` x words per texel, per level, from `format_and_sampler`; section 8) is at most the number of words in `textureTexels`;
+- every `lightToTree` value for the `lightCount + emissiveTriangleCount` unified emitters is below `lightTreeEmitterCount`;
+- a light tree node with `left_child >= 0` has both child indices below `lightTreeNodeCount`, and a leaf's `right_or_first_emitter` plus its emitter count (bits `0..15` of `emitter_count_and_kind`) is at most `lightTreeEmitterCount`;
+- an instance's `triangle_offset` plus `total_triangle_count` is at most `triangleCount`.
+
+Not checked: material texture indices, `blas_index`, emitter `record_index` and `leaf_node_index`, per-triangle fields and cycles in the node graph. The kernel's bounds-checked buffer access covers them (an out-of-range read gives zero, not host memory), so a damaged file there gives a wrong picture at worst.
+
 Tables may hold more records than the count says (the packer pads an empty table to one record); they never hold fewer.
 
 The pack file is untrusted input. A reader allocates nothing from a length it has not checked against the file size first.

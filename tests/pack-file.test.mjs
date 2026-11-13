@@ -203,6 +203,50 @@ test('decoding refuses a non-zero reserved field after the metadata length', () 
   expectPackFileError(() => describePackFile(flagged), /reserved field after the metadata length/);
 });
 
+function roomInputWithEdit(tableName, editTable) {
+  const input = buildRoomInput();
+  input[tableName] = input[tableName].slice();
+  editTable(input[tableName], new DataView(input[tableName].buffer));
+  return input;
+}
+
+test('decoding refuses record fields that point outside the tables', () => {
+  const badLightSlot = roomInputWithEdit('lightToTree', (table) => { table[0] = 99; });
+  expectPackFileError(() => decodePackFile(encodePackFile(badLightSlot)), /lightToTree\[0\] is 99 but lightTreeEmitterCount is 2/);
+
+  const badChild = roomInputWithEdit('lightTreeNodes', (table, view) => { view.setInt32(48, 7, true); });
+  expectPackFileError(() => decodePackFile(encodePackFile(badChild)), /light tree node 0 has children 7 and \d+ but lightTreeNodeCount is 3/);
+
+  const badLeaf = roomInputWithEdit('lightTreeNodes', (table, view) => {
+    view.setInt32(2 * 64 + 48, -1, true);
+    view.setUint32(2 * 64 + 52, 5, true);
+    view.setUint32(2 * 64 + 56, 1, true);
+  });
+  expectPackFileError(() => decodePackFile(encodePackFile(badLeaf)), /light tree leaf 2 lists emitter slots 5 to 6 but lightTreeEmitterCount is 2/);
+
+  const badInstance = roomInputWithEdit('instances', (table, view) => { view.setUint32(108, 1000, true); });
+  expectPackFileError(() => decodePackFile(encodePackFile(badInstance)), /instance 0 covers triangles \d+ to \d+ but triangleCount is 86/);
+});
+
+test('decoding checks a texture descriptor against the texel pool', () => {
+  function roomInputWithTexture(width, height, formatAndSampler) {
+    const input = buildRoomInput();
+    input.textureCount = 1;
+    input.kernelParams = input.kernelParams.slice();
+    new DataView(input.kernelParams.buffer).setUint32(27 * 4, 1, true);
+    input.textureDescriptors = new Uint8Array(32);
+    const view = new DataView(input.textureDescriptors.buffer);
+    view.setUint32(4, width, true);
+    view.setUint32(8, height, true);
+    view.setUint32(12, formatAndSampler, true);
+    return input;
+  }
+  assert.equal(decodePackFile(encodePackFile(roomInputWithTexture(2, 2, 0))).textureCount, 1);
+  expectPackFileError(() => decodePackFile(encodePackFile(roomInputWithTexture(65535, 65535, 0))), /texture descriptor 0 \(65535 x 65535 at word 0\)/);
+  expectPackFileError(() => decodePackFile(encodePackFile(roomInputWithTexture(2, 2, 2))), /texture descriptor 0 .* needs words up to 16 but table "textureTexels" holds 4/);
+  expectPackFileError(() => decodePackFile(encodePackFile(roomInputWithTexture(2, 2, 0 | (2 << 8)))), /needs words up to 5 but/);
+});
+
 test('decoding refuses counts that disagree with the table sizes or with kernelParams', () => {
   const bytes = encodePackFile(buildRoomInput());
   expectPackFileError(
