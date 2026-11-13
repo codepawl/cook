@@ -389,3 +389,74 @@ A texture stores levels only when `textureMips: true` is passed to the packer (o
 2. **Plane 1 (`pixel_count .. 2 * pixel_count`)**: `[sum_albedo_r, sum_albedo_g, sum_albedo_b, 0.0]`
 3. **Plane 2 (`2 * pixel_count .. 3 * pixel_count`)**: `[sum_normal_x, sum_normal_y, sum_normal_z, 0.0]`
 4. **Plane 3 (`3 * pixel_count .. 4 * pixel_count`)**: `[sum_luminance, sum_luminance_sq, converged_flag, sample_count]`
+
+---
+
+## 10. Pack File (`.cookpack`)
+
+One file that holds a whole FORMAT-v2 input, so a scene packed by one program can be rendered by another (`cook render scene.cookpack`). `pack-file.mjs` writes and reads it: `encodePackFile(input, metadata?)` returns the bytes of a `buildNativeInputV2` result, and `decodePackFile(bytes)` returns the input object that `traceNative(input, { kernel: "cycles" })` takes. `describePackFile(bytes)` reads the directory, counts and revision without building the input. The file is not a new scene description: it holds the tables of sections 1 to 8 byte for byte, so the rest of this document defines what is in them.
+
+All integers are **little-endian**. The same input always gives the same bytes.
+
+### 10.1 Layout
+
+| Part | Offset | Size | Contents |
+| :--- | ---: | ---: | :--- |
+| Header | `0` | `16` | Magic `COOKPACK` (8 ASCII bytes), `container_version` (`u32`, currently `1`), `table_count` (`u32`) |
+| Directory | `16` | `56 * table_count` | One entry per table, in the order of 10.2 |
+| Metadata | end of directory | `8 + metadata_length` | `metadata_length` (`u32`), a reserved `u32` (`0`), then the metadata as UTF-8 JSON |
+| Tables | next multiple of 8 | | The table bytes, each starting at a multiple of 8, padded with zero bytes |
+
+A directory entry is 56 bytes: `name` (32 bytes, printable ASCII padded with zero bytes), `element_type` (`u32`: `1` = `u8`, `2` = `u32`, `3` = `f32`), a reserved `u32` (`0`), `byte_offset` (`u64`, from the start of the file, a multiple of 8) and `byte_length` (`u64`, a multiple of the element size). A table lies wholly inside the file and after the metadata. Tables do not overlap; the writer places them in directory order.
+
+### 10.2 Tables
+
+| Name | Element type | Required | Section |
+| :--- | :--- | :--- | :--- |
+| `kernelParams` | `u8` | yes | 1 (exactly `320` bytes) |
+| `instances` | `u8` | yes | 2 |
+| `triangles` | `u8` | yes | 3 |
+| `materials` | `u8` | yes | 4 |
+| `emissiveTriangles` | `u8` | yes | 5 |
+| `lights` | `u8` | yes | 6 |
+| `lightTreeNodes` | `u8` | yes | 7 |
+| `lightTreeEmitters` | `u8` | no | 7b |
+| `lightToTree` | `u32` | no | 7b |
+| `textureDescriptors` | `u8` | yes | 8 |
+| `textureTexels` | `u32` | yes | 8 (the texel pool) |
+| `environmentTexels` | `f32` | yes | `@binding(10)` |
+
+**Absent and empty are different.** A required table is always in the directory; a table with no content has `byte_length` `0`. The three light tree emitter tables (`lightTreeEmitters`, `lightToTree` and the count `lightTreeEmitterCount`) are **all present or all absent**: a file packed before the light tree landed has none of them, and the host then binds a zeroed record (section 7b). A reader gives back exactly the tables the directory lists and no others.
+
+### 10.3 Metadata
+
+A JSON object with these members, in this order:
+
+| Member | Meaning |
+| :--- | :--- |
+| `schemaVersion` | `2`, the `schemaVersion` of the input (`FORMAT_V2_VERSION`) |
+| `packRevision` | The pack revision of the packer that wrote the input (`PACK_REVISION` in `pack-input-v2.mjs`) |
+| `counts` | `instanceCount`, `triangleCount`, `materialCount`, `emissiveTriangleCount`, `lightCount`, `lightTreeNodeCount`, `lightTreeEmitterCount` (`null` when the emitter tables are absent) and `textureCount`, each a whole number from `0` to `4294967295` |
+| `extra` | Optional: whatever JSON object the writer was given (for example the name of the program that exported the scene) |
+
+The image size and the sample count are not repeated here: read them from `kernelParams` (`width` and `height` at `u32[2]` and `u32[3]`, the sample count at `u32[6]`). `cook render` takes its defaults from there.
+
+### 10.4 What a reader checks
+
+A reader refuses a file, with an error that says what is wrong and carries `code: "COOK_PACK_FILE"`, when:
+
+- the file is shorter than the header, the directory or the metadata it announces, or a table ends after the end of the file (truncated);
+- the magic is not `COOKPACK`, or `container_version` is not one the reader knows;
+- a table name is unknown, repeated or not printable, an element type code is unknown or differs from the table's type in 10.2, or a reserved field is not `0`;
+- a table starts before the end of the metadata or at an offset that is not a multiple of 8, or its length is not a multiple of its element size;
+- a required table is missing, or only some of the light tree emitter tables are present;
+- the metadata is not valid JSON, `schemaVersion` is not `2`, `packRevision` is not a whole number of at least `1`, or a count is missing or out of range;
+- a table is smaller than its count times the stride of `STRUCT_STRIDES_V2` (`kernelParams` must be exactly `320` bytes, `lightToTree` needs `4 * (lightCount + emissiveTriangleCount)` bytes, `lightTreeEmitters` has a `32` byte stride), or a count differs from the same count inside `kernelParams` (`u32[21]` to `u32[27]`), or `kernelParams` does not begin with `FORMAT_V2_MAGIC` and `FORMAT_V2_VERSION`.
+
+Tables may hold more records than the count says (the packer pads an empty table to one record); they never hold fewer.
+
+The pack file is untrusted input. A reader allocates nothing from a length it has not checked against the file size first.
+
+### 10.5 Revision
+
+`packRevision` says which packer wrote the tables. The host reads a range of revisions (`describeEngine().packFormat.readsRevisions` in `engine.mjs`); a file outside it is refused before decoding with an error whose `code` is `COOK_PACK_REVISION` and whose message names both revisions. `PACK_REVISION` is bumped when a change makes an input packed before it render differently or fail; see the comment at its definition.
