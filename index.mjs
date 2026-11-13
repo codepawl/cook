@@ -88,7 +88,8 @@ function kernelFromEnvironment() {
  * then `'legacy'`.
  */
 export function resolveNativeKernel(kernel) {
-  const selectedKernel = kernel ?? kernelFromEnvironment() ?? 'legacy';
+  // Only a left-out kernel falls back: `null` is refused like any other wrong name.
+  const selectedKernel = kernel !== undefined ? kernel : (kernelFromEnvironment() ?? 'legacy');
   if (typeof selectedKernel !== 'string' || !VALID_KERNELS.has(selectedKernel)) {
     throw new Error(
       `Invalid native kernel ${JSON.stringify(selectedKernel)}: pass "legacy" or "cycles" in options.kernel, COOK_KERNEL or JS67_NATIVE_KERNEL.`

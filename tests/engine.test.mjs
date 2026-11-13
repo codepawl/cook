@@ -60,6 +60,7 @@ test('every kernel the engine lists is accepted by resolveNativeKernel and an un
   }
   assert.equal(resolveNativeKernel(undefined), describeEngine().defaultKernel);
   assert.throws(() => resolveNativeKernel('nope'), /COOK_KERNEL/);
+  assert.throws(() => resolveNativeKernel(null), /Invalid native kernel null/);
 });
 
 test('the limits of the engine description match what the packer checks', () => {
