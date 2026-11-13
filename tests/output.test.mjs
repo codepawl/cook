@@ -14,6 +14,12 @@ test('the tone curve gives the hand-computed ACES values and the gamma 2.2 bytes
   assert.ok(Math.abs(acesChannel(1) - 2.54 / 3.16) < 1e-12);
   assert.ok(Math.abs(acesChannel(0.18) - 0.2668989) < 1e-7);
   assert.equal(acesChannel(1000), 1);
+  assert.equal(acesChannel(1e30), 1);
+  assert.equal(acesChannel(Infinity), 1);
+  assert.equal(acesChannel(-Infinity), 0);
+  assert.equal(acesChannel(NaN), 0);
+  assert.equal(displayByte(Infinity), 255);
+  assert.equal(displayByte(NaN), 0);
   assert.equal(displayByte(0), 0);
   assert.equal(displayByte(0.18), 140);
   assert.equal(displayByte(0.5), 205);

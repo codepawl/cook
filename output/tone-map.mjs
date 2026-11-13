@@ -8,6 +8,9 @@ function clampUnit(value) {
 
 /** The rasterizer's ACES fit for one linear channel (src/view-transform.js `acesChannel` of codepawl/67.js). */
 export function acesChannel(value) {
+  // Infinity / Infinity would be NaN and a NaN byte is written as black: the brightest sample must stay white.
+  if (value === Number.POSITIVE_INFINITY) return 1;
+  if (Number.isNaN(value)) return 0;
   const color = Math.max(value, 0);
   return clampUnit((color * (2.51 * color + 0.03)) / (color * (2.43 * color + 0.59) + 0.14));
 }
