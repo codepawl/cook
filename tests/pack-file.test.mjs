@@ -172,6 +172,37 @@ test('decoding refuses an unknown element type, a wrong one, an unaligned or ove
   expectPackFileError(() => decodePackFile(withEntryField(bytes, 'lightToTree', 48, 6)), /not a multiple of its 4-byte u32 elements/);
 });
 
+test('decoding refuses tables that overlap or alias each other', () => {
+  const bytes = encodePackFile(buildRoomInput());
+  const directory = describePackFile(bytes).directory;
+  const instances = directory.find((entry) => entry.name === 'instances');
+  const triangles = directory.find((entry) => entry.name === 'triangles');
+  const aliased = withEntryField(bytes, 'triangles', 40, instances.byteOffset);
+  expectPackFileError(() => decodePackFile(aliased), /tables "instances".*and "triangles".*overlap/);
+  expectPackFileError(() => describePackFile(aliased), /overlap/);
+  const startsInside = withEntryField(bytes, 'triangles', 40, instances.byteOffset + 8);
+  expectPackFileError(() => decodePackFile(startsInside), /overlap/);
+  assert.ok(triangles.byteLength > 0);
+});
+
+test('an empty table may share an offset with its neighbour', () => {
+  const input = buildRoomInput();
+  input.environmentTexels = new Float32Array(0);
+  const bytes = encodePackFile(input);
+  const environment = describePackFile(bytes).directory.find((entry) => entry.name === 'environmentTexels');
+  const sharing = withEntryField(bytes, 'environmentTexels', 40, environment.byteOffset - 8);
+  assert.equal(decodePackFile(sharing).environmentTexels.length, 0);
+});
+
+test('decoding refuses a non-zero reserved field after the metadata length', () => {
+  const bytes = encodePackFile(buildRoomInput());
+  const directoryEnd = ENTRY_START + describePackFile(bytes).directory.length * ENTRY_BYTES;
+  const flagged = Uint8Array.from(bytes);
+  new DataView(flagged.buffer).setUint32(directoryEnd + 4, 1, true);
+  expectPackFileError(() => decodePackFile(flagged), /reserved field after the metadata length is not 0/);
+  expectPackFileError(() => describePackFile(flagged), /reserved field after the metadata length/);
+});
+
 test('decoding refuses counts that disagree with the table sizes or with kernelParams', () => {
   const bytes = encodePackFile(buildRoomInput());
   expectPackFileError(

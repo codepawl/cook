@@ -306,6 +306,9 @@ function readDirectory(bytes, view) {
 
 function readMetadata(bytes, view, directoryEnd) {
   const metadataLength = view.getUint32(directoryEnd, true);
+  if (view.getUint32(directoryEnd + 4, true) !== 0) {
+    throw new PackFileError('decodePackFile: the reserved field after the metadata length is not 0.');
+  }
   const metadataStart = directoryEnd + METADATA_PREFIX_BYTES;
   if (metadataStart + metadataLength > bytes.length) {
     throw new PackFileError(`decodePackFile: the file is truncated: the metadata block needs bytes ${metadataStart} to ${metadataStart + metadataLength} but the file has ${bytes.length}.`);
@@ -355,7 +358,21 @@ function checkTablePlacement(entry, fileLength, dataStart) {
   }
 }
 
+function checkTablesDoNotOverlap(entries) {
+  const placed = entries.filter((entry) => entry.byteLength > 0).sort((first, second) => first.byteOffset - second.byteOffset);
+  for (let index = 1; index < placed.length; index++) {
+    const previous = placed[index - 1];
+    const current = placed[index];
+    if (current.byteOffset < previous.byteOffset + previous.byteLength) {
+      throw new PackFileError(
+        `decodePackFile: tables "${previous.name}" (bytes ${previous.byteOffset} to ${previous.byteOffset + previous.byteLength}) and "${current.name}" (starting at byte ${current.byteOffset}) overlap; tables must not share bytes.`
+      );
+    }
+  }
+}
+
 function readPackFileStructure(bytes) {
+  assertLittleEndianHost();
   requireBytes(bytes, 'decodePackFile');
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const { containerVersion, entries, directoryEnd } = readDirectory(bytes, view);
@@ -364,6 +381,7 @@ function readPackFileStructure(bytes) {
   for (const entry of entries) {
     checkTablePlacement(entry, bytes.length, dataStart);
   }
+  checkTablesDoNotOverlap(entries);
   const entryByName = new Map(entries.map((entry) => [entry.name, entry]));
   for (const spec of TABLE_SPECS) {
     if (!spec.optional && !entryByName.has(spec.name)) {

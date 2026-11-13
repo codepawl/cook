@@ -448,7 +448,7 @@ A reader refuses a file, with an error that says what is wrong and carries `code
 - the file is shorter than the header, the directory or the metadata it announces, or a table ends after the end of the file (truncated);
 - the magic is not `COOKPACK`, or `container_version` is not one the reader knows;
 - a table name is unknown, repeated or not printable, an element type code is unknown or differs from the table's type in 10.2, or a reserved field is not `0`;
-- a table starts before the end of the metadata or at an offset that is not a multiple of 8, or its length is not a multiple of its element size;
+- a table starts before the end of the metadata or at an offset that is not a multiple of 8, or its length is not a multiple of its element size, or two tables with a non-zero length share bytes (a table of length `0` may sit at any aligned offset);
 - a required table is missing, or only some of the light tree emitter tables are present;
 - the metadata is not valid JSON, `schemaVersion` is not `2`, `packRevision` is not a whole number of at least `1`, or a count is missing or out of range;
 - a table is smaller than its count times the stride of `STRUCT_STRIDES_V2` (`kernelParams` must be exactly `320` bytes, `lightToTree` needs `4 * (lightCount + emissiveTriangleCount)` bytes, `lightTreeEmitters` has a `32` byte stride), or a count differs from the same count inside `kernelParams` (`u32[21]` to `u32[27]`), or `kernelParams` does not begin with `FORMAT_V2_MAGIC` and `FORMAT_V2_VERSION`.
