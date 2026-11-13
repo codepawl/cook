@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // The Cook command line: render a pack file to a picture, or describe one. Loads only this package and Node built-ins.
-import { readFileSync, writeFileSync } from 'node:fs';
-import { basename, extname } from 'node:path';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, extname } from 'node:path';
 import { parseArgs } from 'node:util';
 
 import { describeEngine, isTimeLimitError } from '../engine.mjs';
-import { COOK_PACK_REVISION_CODE, findNativeAddon, traceNative } from '../index.mjs';
+import { COOK_PACK_REVISION_CODE, loadNativeAddon, traceNative } from '../index.mjs';
 import { PackFileError, decodePackFile, describePackFile } from '../pack-file.mjs';
 import { validatePackOptions } from '../pack-input-v2.mjs';
 import { encodeNpy } from '../output/npy.mjs';
@@ -39,7 +39,7 @@ The scene is always rendered with the cycles kernel. The seed, camera and bounce
 Environment: COOK_ADDON_PATH names a built render-native.node elsewhere.
 
 Exit codes: 0 done, 1 the render failed, 2 wrong arguments, 3 the pack file is unreadable, damaged or of a revision this
-Cook does not read, 4 the time limit passed, 5 the native addon is not built (npm run build).
+Cook does not read, 4 the time limit passed, 5 the native addon is not built or cannot be loaded (npm run build).
 A render that fails on the card (for example no Vulkan adapter with ray queries) exits 1 with the addon's message.
 `;
 
@@ -67,6 +67,20 @@ function parseSeconds(text) {
   return seconds;
 }
 
+// A wrong folder is found before the trace, not after minutes of rendering.
+function requireWritableOutputFolder(outputPath) {
+  const folder = dirname(outputPath);
+  let isFolder = false;
+  try {
+    isFolder = statSync(folder).isDirectory();
+  } catch {
+    isFolder = false;
+  }
+  if (!isFolder) {
+    throw new UsageError(`--output ${JSON.stringify(outputPath)}: the folder ${JSON.stringify(folder)} does not exist. Create it or give another path.`);
+  }
+}
+
 function parseRenderOptions(values) {
   const outputExtension = values.output === undefined ? '' : extname(values.output).toLowerCase();
   if (values.output === undefined) {
@@ -75,6 +89,7 @@ function parseRenderOptions(values) {
   if (outputExtension !== '.png' && outputExtension !== '.npy') {
     throw new UsageError(`--output must end in .png or .npy; got ${JSON.stringify(basename(values.output))}.`);
   }
+  requireWritableOutputFolder(values.output);
   const denoise = values.denoise ?? 'none';
   if (!DENOISERS.includes(denoise)) {
     throw new UsageError(`--denoise must be one of ${DENOISERS.join(', ')}; got ${JSON.stringify(denoise)}.`);
@@ -103,7 +118,7 @@ function resolveImageSize(requestedWidth, requestedHeight, packedImage) {
   const width = requestedWidth ?? widthFromHeight;
   const height = requestedHeight ?? heightFromWidth;
   const keepsAspect = requestedWidth === undefined || requestedHeight === undefined
-    || heightFromWidth === requestedHeight || widthFromHeight === requestedWidth;
+    || requestedWidth * packedHeight === requestedHeight * packedWidth;
   if (!keepsAspect) {
     throw new UsageError(
       `${requestedWidth} x ${requestedHeight} has another aspect ratio than the packed ${packedWidth} x ${packedHeight}, and the camera in the pack is fixed to it. Give one of --width or --height, or a size at the ratio ${packedWidth}:${packedHeight} (for example ${packedWidth * 2} x ${packedHeight * 2}).`
@@ -127,6 +142,15 @@ function readPackFile(path) {
   }
 }
 
+function decodePackFileForCli(bytes, path) {
+  try {
+    return decodePackFile(bytes);
+  } catch (packError) {
+    if (packError instanceof PackFileError) throw new CliFailure(`${path}: ${packError.message}`, EXIT_BAD_PACK);
+    throw packError;
+  }
+}
+
 function requireReadablePackRevision(description, path) {
   const [oldestRevision, newestRevision] = describeEngine().packFormat.readsRevisions;
   if (description.packRevision < oldestRevision || description.packRevision > newestRevision) {
@@ -139,15 +163,12 @@ function requireReadablePackRevision(description, path) {
   }
 }
 
+// Loads the addon now, so a missing, wrong-platform or damaged addon exits 5 before any work and not 1 after it.
 function requireAddon() {
-  let addonPath;
   try {
-    addonPath = findNativeAddon();
-  } catch (environmentError) {
-    throw new CliFailure(environmentError.message, EXIT_NO_ADDON);
-  }
-  if (addonPath === null) {
-    throw new CliFailure('the native addon is not built. Run `npm run build` in the Cook package (it needs Rust), or set COOK_ADDON_PATH to a built render-native.node.', EXIT_NO_ADDON);
+    loadNativeAddon();
+  } catch (loadError) {
+    throw new CliFailure(loadError.message, EXIT_NO_ADDON);
   }
 }
 
@@ -185,11 +206,12 @@ function runRender(positionals, values) {
   } catch (rangeError) {
     throw new UsageError(rangeError.message);
   }
+  const input = decodePackFileForCli(bytes, scenePath);
   requireAddon();
 
   let result;
   try {
-    result = traceNative(decodePackFile(bytes), traceOptions);
+    result = traceNative(input, traceOptions);
   } catch (traceError) {
     if (isTimeLimitError(traceError)) {
       throw new CliFailure(`the trace passed its time limit of ${options.maxSeconds} s; nothing was written. Raise --max-seconds or lower --samples.`, EXIT_TIME_LIMIT);

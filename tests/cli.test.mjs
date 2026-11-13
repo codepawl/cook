@@ -6,6 +6,9 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { encodePackFile } from '../pack-file.mjs';
+import { buildRoomInput } from '../tools/make-fixture-pack.mjs';
+
 const PACKAGE_DIRECTORY = fileURLToPath(new URL('..', import.meta.url));
 const CLI_PATH = join(PACKAGE_DIRECTORY, 'bin', 'cook.mjs');
 const FIXTURE_PATH = join(PACKAGE_DIRECTORY, 'fixtures', 'room.cookpack');
@@ -103,4 +106,39 @@ test('render refuses a pack of a newer revision before it looks for the addon, a
   const info = cook(['info', newerPath]);
   assert.equal(info.status, 0);
   assert.match(info.stdout, /pack revision: 2 \(this Cook reads 1 to 1: NOT readable\)/);
+});
+
+test('an output folder that does not exist is a usage error found before any work', () => {
+  const result = cook(['render', FIXTURE_PATH, '--output', outputPath('no-such-folder/out.png')]);
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /the folder .*no-such-folder.* does not exist/);
+});
+
+test('a size at another ratio is refused even when rounding one side lands on the requested value', () => {
+  const result = cook(['render', FIXTURE_PATH, '--output', outputPath('never.png'), '--width', '3', '--height', '2']);
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /3 x 2 has another aspect ratio than the packed 160 x 120/);
+});
+
+test('an addon file that exists but cannot be loaded exits 5, like a missing one', () => {
+  const brokenAddon = outputPath('broken.node');
+  writeFileSync(brokenAddon, 'this is not a native module');
+  const result = spawnSync(process.execPath, [CLI_PATH, 'render', FIXTURE_PATH, '--output', outputPath('never.png')], {
+    encoding: 'utf8',
+    env: { ...process.env, COOK_ADDON_PATH: brokenAddon },
+  });
+  assert.equal(result.status, 5, result.stderr);
+  assert.match(result.stderr, /native addon at .*broken\.node.* cannot be loaded/);
+  assert.equal(existsSync(outputPath('never.png')), false);
+});
+
+test('a pack whose records point outside their tables exits 3, not 1', () => {
+  const damagedInput = buildRoomInput();
+  damagedInput.lightToTree = damagedInput.lightToTree.slice();
+  damagedInput.lightToTree[0] = 99;
+  const damagedPath = outputPath('damaged.cookpack');
+  writeFileSync(damagedPath, encodePackFile(damagedInput));
+  const result = cook(['render', damagedPath, '--output', outputPath('never.png')]);
+  assert.equal(result.status, 3, result.stderr);
+  assert.match(result.stderr, /lightToTree\[0\] is 99/);
 });

@@ -35,7 +35,7 @@ node bin/cook.mjs render fixtures/room.cookpack --output room.npy --samples 256 
 - `cook render <scene.cookpack> --output <file.png|file.npy>` renders with the `cycles` kernel. A `.png` is 8 bit with the ACES curve and gamma 2.2 that 67js uses by default; a `.npy` is the linear float32 RGBA image, shape height x width x 4.
 - `--width`, `--height` change the size at the aspect ratio of the pack (the camera in the pack is fixed to it); `--samples`, `--max-seconds` (stops with exit code 4 and writes nothing), `--denoise none|atrous` and `--dispatch-samples` are the other options. Seed, camera and bounce limits are stored in the pack.
 - `cook info <scene.cookpack>` prints the container version, pack revision, image size, record counts and the table directory.
-- `cook --help` lists the options and the exit codes (0 done, 1 render failed, 2 wrong arguments, 3 unreadable or too new pack, 4 time limit, 5 addon not built).
+- `cook --help` lists the options and the exit codes (0 done, 1 render failed, 2 wrong arguments, 3 unreadable or too new pack, 4 time limit, 5 addon not built or not loadable).
 
 ## JavaScript
 

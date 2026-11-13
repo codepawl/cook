@@ -88,7 +88,7 @@ export function resolveNativeKernel(kernel) {
   const selectedKernel = kernel ?? kernelFromEnvironment() ?? 'legacy';
   if (typeof selectedKernel !== 'string' || !VALID_KERNELS.has(selectedKernel)) {
     throw new Error(
-      `Invalid native kernel ${JSON.stringify(selectedKernel)}: pass "legacy" or "cycles" in options.kernel , COOK_KERNEL or JS67_NATIVE_KERNEL.`
+      `Invalid native kernel ${JSON.stringify(selectedKernel)}: pass "legacy" or "cycles" in options.kernel, COOK_KERNEL or JS67_NATIVE_KERNEL.`
     );
   }
   return selectedKernel;
@@ -349,10 +349,25 @@ export function traceNativeTexels(input, texels, { samples, maxSeconds }) {
   return withTimeLimitCode(() => addon.traceTexels(input, texels, { samples, maxSeconds }));
 }
 
-function loadAddon() {
+/**
+ * Loads the native addon and returns it. Throws when it is not built, or when the file cannot be loaded (built for another
+ * platform, a shared library missing, or `COOK_ADDON_PATH` naming a file that is not an addon); the message says which.
+ */
+export function loadNativeAddon() {
   const addonPath = findNativeAddon();
   if (!addonPath) throw new Error('The native tracer is not built. Run `npm run build` in the Cook package, or set COOK_ADDON_PATH to a built render-native.node.');
-  return createRequire(import.meta.url)(addonPath);
+  try {
+    return createRequire(import.meta.url)(addonPath);
+  } catch (loadError) {
+    throw new Error(
+      `The native addon at ${JSON.stringify(addonPath)} cannot be loaded: ${loadError.message}. Build it again with \`npm run build\` on this machine, or point COOK_ADDON_PATH at a matching render-native.node.`,
+      { cause: loadError }
+    );
+  }
+}
+
+function loadAddon() {
+  return loadNativeAddon();
 }
 
 // ---- Persistent session (issue 896) ----
