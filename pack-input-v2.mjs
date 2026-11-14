@@ -21,7 +21,7 @@ export const INVALID_INDEX_V2 = 0xffffffff;
 // before it render differently or fail on the host (a field changes meaning, a table gains required content, a flag changes
 // its default). A change that old inputs still render correctly under does not bump it. The pack file, the engine
 // description (`describeEngine().packFormat`) and the host's revision check all read this one constant.
-export const PACK_REVISION = 1;
+export const PACK_REVISION = 2;
 
 // Byte offset of `filter_glossy` inside a `KernelParamsV2` buffer (u32[75] * 4 = 300).
 // Used in `packKernelParamsV2` and in `index.mjs` when patching a pre-built buffer.
@@ -1753,6 +1753,34 @@ function sanitizeEnvironmentChannel(value, limit) {
   return Math.min(limit, number);
 }
 
+/** The largest power of two that is at most `count` (a count of 1 or more). */
+function largestPowerOfTwoAtMost(count) {
+  let power = 1;
+  while (power * 2 <= count) {
+    power *= 2;
+  }
+  return power;
+}
+
+/**
+ * Writes the guide of one cumulative table into the `z` channel of its entries: `bucketCount` (the largest power of two at most
+ * `count`) buckets of equal probability, entry `bucket` holding the first table index whose cumulative value is above
+ * `bucket / bucketCount`. A pick `u` in `[bucket / bucketCount, (bucket + 1) / bucketCount)` then lies between the guide of its
+ * bucket and the guide of the next, so the kernel searches a few entries instead of the whole table and finds the same index
+ * as a search of the whole table would. A bucket start is exact in float32, so the kernel compares the same numbers.
+ */
+function writeEnvironmentGuide(texels, firstEntry, count) {
+  const bucketCount = largestPowerOfTwoAtMost(count);
+  let guideIndex = 0;
+  for (let bucket = 0; bucket < bucketCount; bucket++) {
+    const bucketStart = bucket / bucketCount;
+    while (guideIndex < count - 1 && texels[(firstEntry + guideIndex) * 4] <= bucketStart) {
+      guideIndex += 1;
+    }
+    texels[(firstEntry + bucket) * 4 + 2] = guideIndex;
+  }
+}
+
 function packEnvironmentTexelsV2(environment, options = {}) {
   if (!environment || !(environment.width > 0 && environment.height > 0)) {
     const bg = options.backgroundColor ?? [0, 0, 0];
@@ -1842,7 +1870,9 @@ function packEnvironmentTexelsV2(environment, options = {}) {
       texels[condBase + 2] = 0.0;
       texels[condBase + 3] = 0.0;
     }
+    writeEnvironmentGuide(texels, envCdfOffset + height + y * width, width);
   }
+  writeEnvironmentGuide(texels, envCdfOffset, height);
 
   const envColor = options.envColor ?? [intensity, intensity, intensity];
   return {

@@ -1608,6 +1608,24 @@ mod tests {
         assert!(kernel[accumulate_start..accumulate_end].contains("int_direct_sample_visibility(sample, point, transparent_bounces)"));
     }
 
+    /// The environment lookup starts from the packer's guide and searches only between two guide entries, with the same comparison as
+    /// a search of the whole table, so the sampled texel does not change.
+    #[test]
+    fn the_environment_lookup_searches_between_two_guide_entries() {
+        let kernel = assemble_cycles_kernel().expect("the kernel assembles");
+        let search_start = kernel.find("fn lgt_search_env_cdf(").expect("the lookup exists");
+        let search_end = search_start + kernel[search_start..].find("
+}").expect("the lookup ends");
+        let search_body = &kernel[search_start..search_end];
+        assert!(search_body.contains("1u << firstLeadingBit(count)"));
+        assert!(search_body.contains("var low = u32(environment_texels[base_offset + bucket].z);"));
+        assert!(search_body.contains("high = u32(environment_texels[base_offset + bucket + 1u].z);"));
+        assert!(search_body.contains("environment_texels[base_offset + mid].x <= pick_u"));
+        assert!(kernel.contains("lgt_search_env_cdf(cdf_base, height, sample_u4.x)"));
+        assert!(kernel.contains("lgt_search_env_cdf(cond_base, width, sample_u4.y)"));
+        assert!(!kernel.contains("lgt_binary_search_env_cdf"));
+    }
+
     /// The mip levels sit after level 0 in one run of words (`texture_fetch_texel` stays the only reader of the pool).
     #[test]
     fn a_mip_level_is_found_by_walking_the_halving_chain_from_level_0() {

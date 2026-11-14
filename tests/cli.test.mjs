@@ -41,7 +41,7 @@ test('info describes the fixture without an addon', () => {
   const result = cook(['info', FIXTURE_PATH]);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /file: room\.cookpack/);
-  assert.match(result.stdout, /pack revision: 1 \(this Cook reads 1 to 1\)/);
+  assert.match(result.stdout, /pack revision: 2 \(this Cook reads 2 to 2\)/);
   assert.match(result.stdout, /image: 160 x 120, 64 samples/);
   assert.match(result.stdout, /triangleCount: 86/);
   assert.match(result.stdout, /textureTexels {2}u32 {2}offset \d+ {2}\d+ bytes/);
@@ -97,15 +97,15 @@ test('a size at the packed aspect ratio gets past the argument checks and stops 
 test('render refuses a pack of a newer revision before it looks for the addon, and info still reads it', () => {
   const newerPath = outputPath('newer.cookpack');
   const original = readFileSync(FIXTURE_PATH);
-  const patched = Buffer.from(original.toString('latin1').replace('"packRevision":1', '"packRevision":2'), 'latin1');
+  const patched = Buffer.from(original.toString('latin1').replace('"packRevision":2', '"packRevision":3'), 'latin1');
   assert.equal(patched.length, original.length);
   writeFileSync(newerPath, patched);
   const render = cook(['render', newerPath, '--output', outputPath('never.png')]);
   assert.equal(render.status, 3);
-  assert.match(render.stderr, /pack revision 2, but this Cook .* reads revisions 1 to 1\. Update Cook \(error COOK_PACK_REVISION\)/);
+  assert.match(render.stderr, /pack revision 3, but this Cook .* reads revisions 2 to 2\. Update Cook \(error COOK_PACK_REVISION\)/);
   const info = cook(['info', newerPath]);
   assert.equal(info.status, 0);
-  assert.match(info.stdout, /pack revision: 2 \(this Cook reads 1 to 1: NOT readable\)/);
+  assert.match(info.stdout, /pack revision: 3 \(this Cook reads 2 to 2: NOT readable\)/);
 });
 
 test('an output folder that does not exist is a usage error found before any work', () => {

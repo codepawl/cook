@@ -42,7 +42,7 @@ test('describeEngine reports the package version, pack format, kernels, passes a
   const packageJson = JSON.parse(readFileSync(join(PACKAGE_DIRECTORY, 'package.json'), 'utf8'));
   assert.equal(engine.name, 'cook');
   assert.equal(engine.version, packageJson.version);
-  assert.deepEqual(engine.packFormat, { version: 2, revision: PACK_REVISION, readsRevisions: [1, PACK_REVISION] });
+  assert.deepEqual(engine.packFormat, { version: 2, revision: PACK_REVISION, readsRevisions: [2, PACK_REVISION] });
   assert.deepEqual(engine.kernels, ['legacy', 'cycles']);
   assert.equal(engine.defaultKernel, 'legacy');
   assert.deepEqual(engine.denoisers, ['none', 'atrous', 'oidn']);

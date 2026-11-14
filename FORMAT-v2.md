@@ -18,7 +18,7 @@ All integers and IEEE-754 `f32` values are **little-endian**. Every structured r
 | `7` | `light_tree_nodes` | `storage, read` | `LightTreeNode` | `64` | `16` | Orientation-aware light BVH nodes over analytic + emissive emitters |
 | `8` | `texture_descriptors` | `storage, read` | `TextureDescriptor` | `32` | `16` | Mipmapped 2D texture headers and UV transforms |
 | `9` | `texture_texels` | `storage, read` | `u32` | `4` | `4` | Packed RGBA8 / RGBA32F / RG16F texel words, IES profiles, Sobol tables |
-| `10` | `environment_texels` | `storage, read` | `vec4<f32>` | `16` | `16` | Linear HDRI texels followed by marginal/conditional CDF rows |
+| `10` | `environment_texels` | `storage, read` | `vec4<f32>` | `16` | `16` | Linear HDRI texels followed by marginal/conditional CDF rows. In each CDF entry `x` is the cumulative probability, `y` the probability of the entry and `z` its guide (below) |
 | `11` | `film_accumulation` | `storage, read_write` | `vec4<f32>` | `16` | `16` | 4 planes of `image_width * image_height` vec4s (radiance+Z, albedo, normal, moments+count) |
 | `12` | `cycles_lut` | `storage, read` | `u32` | `4` | `4` | Static LUTs, then the two pixel filter tables |
 | `13` | `light_tree_emitters` | `storage, read` | `LightTreeEmitter` | `32` | `16` | Emitters in tree order, leaf by leaf (light tree revision 1, section 7b) |
@@ -474,6 +474,13 @@ Tables may hold more records than the count says (the packer pads an empty table
 
 The pack file is untrusted input. A reader allocates nothing from a length it has not checked against the file size first.
 
+**Environment guide.** For each cumulative table (the marginal table of `height` entries and each row of `width` entries) let `bucketCount` be the largest power of two that is at most the entry count. Entry `b` (for `b` from `0` to `bucketCount - 1`) stores in `z` the first table index whose `x` is above `b / bucketCount` (the last index when none is), as a float32 whole number. A pick `u` in `[b / bucketCount, (b + 1) / bucketCount)` then has its index between the guide of bucket `b` and the guide of bucket `b + 1` (the last index for the last bucket), and the kernel searches only that range instead of the whole table, about 20 dependent loads before and a few now. The index found is the one a search of the whole table finds, so the sampled direction and the pdf are unchanged.
+
 ### 10.5 Revision
 
 `packRevision` says which packer wrote the tables. The host reads a range of revisions (`describeEngine().packFormat.readsRevisions` in `engine.mjs`); a file outside it is refused before decoding with an error whose `code` is `COOK_PACK_REVISION` and whose message names both revisions. `PACK_REVISION` is bumped when a change makes an input packed before it render differently or fail; see the comment at its definition. The packers (`buildNativeInput`, `buildNativeInputV2`, `upgradeNativeInputV1ToV2` and the light bake input) stamp the same number as `packRevision` on the input they return, `decodePackFile` stamps the one from the file, and `traceNative`, `traceNativeTexels` and `createNativeSession` (also its `update`) refuse an input outside the range with the same error code before the addon is loaded. An input with no `packRevision` (built by hand, or by a packer from before the stamp) counts as revision `1`; once revision `1` is no longer read, such an input is refused too.
+
+Revisions:
+
+- `1`: the first revision. The `z` channel of the environment CDF entries is `0`.
+- `2`: the `z` channel of the environment CDF entries holds the guide of the lookup (see "Environment guide" above). A revision `1` input would send every environment sample to the first entry, so the host no longer reads revision `1`: pack the scene again.
