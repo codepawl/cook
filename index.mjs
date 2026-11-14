@@ -67,7 +67,7 @@ export function findNativeAddon() {
   if (overridePath !== undefined && overridePath !== '') {
     if (!existsSync(overridePath)) {
       throw new Error(
-        `COOK_ADDON_PATH is set to ${JSON.stringify(overridePath)}, which does not exist. Point it at a built render-native.node (npm run build makes build/render-native.node) or unset the variable.`
+        `COOK_ADDON_PATH is set to ${JSON.stringify(overridePath)}, which does not exist. Point it at a built render-native.node (npx cook fetch-addon or npm run build writes build/render-native.node) or unset the variable.`
       );
     }
     return resolve(overridePath);
@@ -383,7 +383,7 @@ export function traceNativeTexels(input, texels, { samples, maxSeconds }) {
  */
 export function loadNativeAddon() {
   const addonPath = findNativeAddon();
-  if (!addonPath) throw new Error('The native tracer is not built. Run `npm run build` in the Cook package, or set COOK_ADDON_PATH to a built render-native.node.');
+  if (!addonPath) throw new Error('The native tracer is not built. Run `npx cook fetch-addon` to download the prebuilt one (Windows x64, Linux x64), or `npm run build` in the Cook package to compile it with Rust, or set COOK_ADDON_PATH to a built render-native.node.');
   try {
     return createRequire(import.meta.url)(addonPath);
   } catch (loadError) {
