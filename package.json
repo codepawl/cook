@@ -29,6 +29,7 @@
     "job-input.mjs",
     "light-tree-v2.mjs",
     "texture-mips.mjs",
+    "fetch-addon.mjs",
     "bin",
     "output",
     "fixtures",

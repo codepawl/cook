@@ -32,3 +32,12 @@ On Windows build for MSVC (`build.mjs` already adds the target). Run `node tools
 ## How Crucible uses Cook
 
 Crucible ([codepawl/crucible](https://github.com/codepawl/crucible)) depends on this package at one pinned commit (`git+https://github.com/codepawl/cook.git#<full sha>` in its `devDependencies`). A change here reaches Crucible only when a pull request there moves the pin. When you change something Crucible calls (the exports, `describeEngine`, the pack format), say so in the pull request so the pin can be moved with a matching change.
+
+## Release
+
+A release gives Windows x64 and Linux x64 users a prebuilt addon, so they need no Rust (`cook fetch-addon`).
+
+1. Set the new version in `package.json` in a pull request, and merge it.
+2. Tag the merged commit on `main` with `v<version>` and push the tag: `git tag v0.1.0 <sha>` and `git push origin v0.1.0`.
+3. The `Release` workflow builds both addons, checks that they load, and attaches each one and its `.sha256` file to the release of the tag. It stops when the tag does not equal the version in `package.json`.
+4. Update the version in the install steps of the README.

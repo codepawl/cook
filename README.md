@@ -23,9 +23,39 @@ Packing and reading scenes is JavaScript only. The packers and `pack-file.mjs` i
 
 ## Install
 
-You need Node 20.19 or newer, Rust (stable) and the driver of your GPU. The steps build the native addon once, which takes a few minutes.
+You need Node 20.19 or newer and the driver of your GPU. On Windows x64 and Linux x64 you do not need Rust: Cook downloads a prebuilt addon.
 
-### Windows
+1. If you use Linux, install the Vulkan loader. On Debian or Ubuntu:
+
+   ```sh
+   sudo apt install libvulkan1
+   ```
+
+2. Install a released version of Cook:
+
+   ```sh
+   npm install github:codepawl/cook#v0.1.0
+   ```
+
+3. Download the prebuilt addon. It prints `Downloaded the prebuilt addon to` and the path.
+
+   ```sh
+   npx cook fetch-addon
+   ```
+
+4. Render the test room. It writes `room.png`.
+
+   ```sh
+   npx cook render node_modules/@codepawlhq/cook/fixtures/room.cookpack --output room.png
+   ```
+
+`cook fetch-addon` takes the addon of the installed version from its GitHub release and checks its SHA-256 before it writes `build/render-native.node`. The Linux addon is built on Ubuntu 22.04, so it needs that glibc or a newer one. If the GPU is from AMD or Intel, Linux also needs its Vulkan driver: `sudo apt install mesa-vulkan-drivers`.
+
+### Build from source
+
+Build the addon yourself on another system, for a commit that is not a release, or when you change Cook. You need Rust (stable) too, and the build takes a few minutes.
+
+On Windows:
 
 1. Install Node, Rust and the C++ build tools:
 
@@ -41,44 +71,28 @@ You need Node 20.19 or newer, Rust (stable) and the driver of your GPU. The step
    rustup target add x86_64-pc-windows-msvc
    ```
 
-4. Do the [common steps](#common-steps).
+On Linux:
 
-### Linux
-
-1. Install Node 20.19 or newer from [nodejs.org](https://nodejs.org) or with `nvm`. The `nodejs` package of older distributions is too old.
-2. Install Rust:
+1. Install Rust:
 
    ```sh
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    ```
 
-3. Install the Vulkan loader and a C compiler. On Debian or Ubuntu:
+2. Install the Vulkan loader and a C compiler: `sudo apt install libvulkan1 build-essential`.
 
-   ```sh
-   sudo apt install libvulkan1 build-essential
-   ```
+Then, on both systems:
 
-4. If the GPU is from AMD or Intel, install its Vulkan driver too: `sudo apt install mesa-vulkan-drivers`. The NVIDIA driver includes its Vulkan driver.
-5. Do the [common steps](#common-steps).
-
-### Common steps
-
-1. Install Cook from GitHub:
+1. Install Cook. Leave out `#v0.1.0` to get the newest commit.
 
    ```sh
    npm install github:codepawl/cook
    ```
 
-2. Build the native addon. It prints `Built build/render-native.node`.
+2. Build the addon. It prints `Built build/render-native.node`.
 
    ```sh
    npm --prefix node_modules/@codepawlhq/cook run build
-   ```
-
-3. Render the test room. It writes `room.png`.
-
-   ```sh
-   npx cook render node_modules/@codepawlhq/cook/fixtures/room.cookpack --output room.png
    ```
 
 Installing runs no script. Building takes the Rust crates listed in `Cargo.lock` from crates.io. From a clone of this repository, run `npm run build` in the clone. `COOK_ADDON_PATH` names an addon built somewhere else. If that path does not exist, Cook stops with an error.
@@ -89,7 +103,7 @@ Installing runs no script. Building takes the Rust crates listed in `Cargo.lock`
 | :--- | :--- |
 | `No Vulkan adapter` | The Vulkan loader or the GPU driver is missing. Install the driver of your GPU and, on Linux, `libvulkan1`. |
 | `The Vulkan adapter does not support ray queries.` | The GPU is too old, or only a software adapter (llvmpipe) is visible. See the cloud note below. |
-| Exit code 5 | The addon is not built or does not load. Do step 2 of the common steps again. |
+| Exit code 5 | The addon is missing, does not load or did not download. Run `npx cook fetch-addon` again, or build from source. |
 
 On a rented Linux GPU box, the host sometimes gives the container only the compute libraries of the NVIDIA driver. Then `vulkaninfo --summary` lists only `llvmpipe`. Copy the graphics libraries of the same driver version (`libEGL_nvidia`, `libGLX_nvidia`, `libnvidia-glcore`, `libnvidia-eglcore`, `libnvidia-glsi`, `libnvidia-tls`, `libnvidia-glvkspirv`, `libnvidia-rtcore`, `libnvidia-gpucomp`) into `/usr/lib/x86_64-linux-gnu`, and point `/etc/vulkan/icd.d/nvidia_icd.json` at `libEGL_nvidia.so.0`. Then `vulkaninfo | grep VK_KHR_ray_query` finds the extension.
 
@@ -111,7 +125,7 @@ node bin/cook.mjs render fixtures/room.cookpack --output room.png
 node bin/cook.mjs render fixtures/room.cookpack --output room.npy --samples 256 --denoise atrous
 ```
 
-`fixtures/room.cookpack` is a small room (a floor, two boxes, an emissive panel and a sky colour) made by `tools/make-fixture-pack.mjs` without any other code. After install the command is `npx cook ...`.
+`fixtures/room.cookpack` is a small room (a floor, two boxes, an emissive panel and a sky colour) made by `tools/make-fixture-pack.mjs` without any other code. After install the command is `npx cook ...`. `cook fetch-addon` downloads the prebuilt addon, see [Install](#install).
 
 - `cook render <scene.cookpack> --output <file.png|file.npy>` renders with the `cycles` kernel. A `.png` is 8 bit with the ACES curve and gamma 2.2 that Crucible uses by default; a `.npy` is the linear float32 RGBA image, shape height x width x 4.
 - `--width`, `--height` change the size at the aspect ratio of the pack (the camera in the pack is fixed to it); `--samples`, `--max-seconds` (stops with exit code 4 and writes nothing), `--denoise none|atrous` and `--dispatch-samples` are the other options. Seed, camera and bounce limits are stored in the pack.

@@ -8,6 +8,7 @@ import { describeEngine, isTimeLimitError } from '../engine.mjs';
 import { COOK_PACK_REVISION_CODE, loadNativeAddon, traceNative } from '../index.mjs';
 import { PackFileError, decodePackFile, describePackFile } from '../pack-file.mjs';
 import { validatePackOptions } from '../pack-input-v2.mjs';
+import { fetchPrebuiltAddon } from '../fetch-addon.mjs';
 import { encodeNpy } from '../output/npy.mjs';
 import { encodePng } from '../output/png.mjs';
 import { toneMapToRgba8 } from '../output/tone-map.mjs';
@@ -25,6 +26,7 @@ const DENOISERS = ['none', 'atrous'];
 const HELP_TEXT = `Usage:
   cook render <scene.cookpack> --output <file.png|file.npy> [options]
   cook info <scene.cookpack>
+  cook fetch-addon
   cook --help | --version
 
 render options:
@@ -35,11 +37,14 @@ render options:
   --denoise none|atrous    none (default) or the a-trous filter (smoothed, biased)
   --dispatch-samples <n>   samples drawn per GPU dispatch (default: chosen automatically)
 
+fetch-addon downloads the prebuilt native addon of this version (Windows x64 and Linux x64) and checks its SHA-256,
+so rendering needs no Rust. Elsewhere, build it with npm run build.
+
 The scene is always rendered with the cycles kernel. The seed, camera and bounce limits are stored in the pack.
 Environment: COOK_ADDON_PATH names a built render-native.node elsewhere.
 
 Exit codes: 0 done, 1 the render failed, 2 wrong arguments, 3 the pack file is unreadable, damaged or of a revision this
-Cook does not read, 4 the time limit passed, 5 the native addon is not built or cannot be loaded (npm run build).
+Cook does not read, 4 the time limit passed, 5 the native addon is not built, cannot be loaded or cannot be downloaded (cook fetch-addon, or npm run build).
 A render that fails on the card (for example no Vulkan adapter with ray queries) exits 1 with the addon's message.
 `;
 
@@ -281,12 +286,26 @@ function run(argv) {
   const [command, ...rest] = positionals;
   if (command === 'render') return runRender(rest, values);
   if (command === 'info') return runInfo(rest);
+  if (command === 'fetch-addon') return runFetchAddon(rest);
   if (command === undefined) throw new UsageError('missing command. Run `cook --help`.');
-  throw new UsageError(`unknown command ${JSON.stringify(command)}; use render or info. Run \`cook --help\`.`);
+  throw new UsageError(`unknown command ${JSON.stringify(command)}; use render, info or fetch-addon. Run \`cook --help\`.`);
+}
+
+async function runFetchAddon(rest) {
+  if (rest.length > 0) {
+    throw new UsageError('fetch-addon takes no arguments.');
+  }
+  let addonPath;
+  try {
+    addonPath = await fetchPrebuiltAddon();
+  } catch (error) {
+    throw new CliFailure(error.message, EXIT_NO_ADDON);
+  }
+  console.log(`Downloaded the prebuilt addon to ${addonPath}`);
 }
 
 try {
-  run(process.argv.slice(2));
+  await run(process.argv.slice(2));
   process.exitCode = EXIT_OK;
 } catch (error) {
   if (error instanceof UsageError) {
