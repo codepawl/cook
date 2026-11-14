@@ -749,6 +749,12 @@ fn lgt_sample_emissive_triangle_at(point: ptr<function, ShadingPoint>, index: u3
   if (SCENE_HAS_EMISSION_MAP && mat.emission_tex >= 0) {
     out.radiance = lgt_textured_emitter_radiance(emitter, bary_u, bary_v);
   }
+  // A blended emitter covers its surface by its opacity, and a ray that hits it emits that share (closure_build weighs the
+  // emission by the layer's opacity). The light sample takes the same share, or a sheet of opacity 0.25 would light the room
+  // four times as much through light sampling as through the rays that reach it.
+  if (SCENE_HAS_TRANSPARENT && mat.alpha_mode == ALPHA_MODE_BLEND) {
+    out.radiance *= int_evaluate_surface_opacity(triangles[emitter.triangle_index], mat, vec2<f32>(bary_u, bary_v));
+  }
   out.pdf = selection_pdf * pdf_solid_angle;
   out.target_instance = emitter.instance_index;
   out.target_triangle = emitter.triangle_index;

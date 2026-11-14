@@ -826,6 +826,24 @@ mod specialization_tests {
     }
 
     #[test]
+    fn a_light_sample_on_a_blended_emitter_takes_the_share_its_opacity_covers() {
+        let kernel = assemble_cycles_kernel().expect("the kernel assembles");
+        let sample_start = kernel.find("fn lgt_sample_emissive_triangle_at(").expect("the emitter sample function");
+        let sample_body = &kernel[sample_start..];
+        let sample_end = sample_body.find("
+fn ").unwrap_or(sample_body.len());
+        let sample_body = &sample_body[..sample_end];
+        let gate = sample_body
+            .find("if (SCENE_HAS_TRANSPARENT && mat.alpha_mode == ALPHA_MODE_BLEND) {")
+            .expect("the opacity share is behind the transparency constant");
+        let scaled = sample_body
+            .find("out.radiance *= int_evaluate_surface_opacity(triangles[emitter.triangle_index], mat, vec2<f32>(bary_u, bary_v));")
+            .expect("the light sample is scaled by the opacity at the sampled point");
+        let emission_map_read = sample_body.find("out.radiance = lgt_textured_emitter_radiance(").expect("the emission map read");
+        assert!(emission_map_read < gate && gate < scaled, "the opacity scales the radiance after the emission map was read");
+    }
+
+    #[test]
     fn the_assembled_kernel_gates_every_ray_cone_update_behind_the_mip_constant() {
         let kernel = assemble_cycles_kernel().expect("the kernel assembles");
         assert!(kernel.contains("const SCENE_HAS_TEXTURE_MIPS: bool = true;"));
