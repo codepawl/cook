@@ -72,6 +72,16 @@ pub(crate) fn read_accumulation(
     Ok(sums)
 }
 
+/// Alpha from the albedo lane's fourth float, which sums 1 for each sample whose camera path ended on the transparent
+/// background. A lane that was never written holds 0, so alpha is exactly 1.0 and a render without a transparent background
+/// is unchanged. The radiance next to it is premultiplied by this alpha, as Cycles writes it.
+fn coverage_alpha(background_coverage_sum: f32, sample_scale: f32) -> f32 {
+    if background_coverage_sum <= 0.0 {
+        return 1.0;
+    }
+    (1.0 - background_coverage_sum * sample_scale).clamp(0.0, 1.0)
+}
+
 pub(crate) fn resolve_image(sums: &[f32], pixel_count: u64) -> ResolvedImage {
     let pixel_total = pixel_count as usize;
     let plane_length = pixel_total * 4;
@@ -84,6 +94,7 @@ pub(crate) fn resolve_image(sums: &[f32], pixel_count: u64) -> ResolvedImage {
     for pixel in 0..pixel_total {
         let radiance = &sums[pixel * 4..pixel * 4 + 4];
         let albedo_sum = &sums[plane_length + pixel * 4..plane_length + pixel * 4 + 3];
+        let background_coverage_sum = sums[plane_length + pixel * 4 + 3];
         let normal_sum = &sums[2 * plane_length + pixel * 4..2 * plane_length + pixel * 4 + 3];
         let statistics = &sums[3 * plane_length + pixel * 4..3 * plane_length + pixel * 4 + 4];
         // A pixel that converged early drew fewer samples; its sums are divided by its own count.
@@ -95,7 +106,7 @@ pub(crate) fn resolve_image(sums: &[f32], pixel_count: u64) -> ResolvedImage {
             radiance[0] * sample_scale,
             radiance[1] * sample_scale,
             radiance[2] * sample_scale,
-            1.0,
+            coverage_alpha(background_coverage_sum, sample_scale),
         ]);
         depth.push(radiance[3] * sample_scale);
         albedo.extend(albedo_sum.iter().map(|value| value * sample_scale));
@@ -134,4 +145,43 @@ pub(crate) fn resolve_texels(sums: &[f32], count: usize, samples: u32) -> Resolv
         escaped.push(sums[(count + texel) * 4] * sample_scale);
     }
     ResolvedTexels { radiance, escaped }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One pixel's four planes: radiance+depth, albedo+coverage, normal, moments+count.
+    fn one_pixel_sums(background_coverage_sum: f32, taken: f32) -> Vec<f32> {
+        vec![
+            0.5 * taken, 0.25 * taken, 0.125 * taken, 0.0,
+            0.0, 0.0, 0.0, background_coverage_sum,
+            0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, taken,
+        ]
+    }
+
+    #[test]
+    fn a_film_that_never_wrote_coverage_resolves_to_alpha_one() {
+        let image = resolve_image(&one_pixel_sums(0.0, 4.0), 1);
+        assert_eq!(image.rgba, vec![0.5, 0.25, 0.125, 1.0]);
+    }
+
+    #[test]
+    fn a_pixel_that_saw_only_background_resolves_to_alpha_zero() {
+        let image = resolve_image(&one_pixel_sums(8.0, 8.0), 1);
+        assert_eq!(image.rgba[3], 0.0);
+    }
+
+    #[test]
+    fn coverage_is_divided_by_the_samples_the_pixel_took() {
+        let image = resolve_image(&one_pixel_sums(1.0, 4.0), 1);
+        assert_eq!(image.rgba[3], 0.75);
+    }
+
+    #[test]
+    fn a_rounding_overshoot_never_leaves_the_unit_range() {
+        let image = resolve_image(&one_pixel_sums(4.0000005, 4.0), 1);
+        assert!(image.rgba[3] >= 0.0 && image.rgba[3] <= 1.0);
+    }
 }

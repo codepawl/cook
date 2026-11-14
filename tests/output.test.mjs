@@ -27,8 +27,8 @@ test('the tone curve gives the hand-computed ACES values and the gamma 2.2 bytes
   assert.equal(displayByte(1000), 255);
 });
 
-test('toneMapToRgba8 maps three channels per pixel, writes alpha 255 and refuses a wrong size', () => {
-  const linear = new Float32Array([1, 0.5, 0.18, 0.25, 0, 0, 1000, 0]);
+test('toneMapToRgba8 maps three channels per pixel, writes alpha 255 for alpha 1 and refuses a wrong size', () => {
+  const linear = new Float32Array([1, 0.5, 0.18, 1, 0, 0, 1000, 1]);
   const mapped = toneMapToRgba8(linear, 2, 1);
   assert.deepEqual(Array.from(mapped), [231, 205, 140, 255, 0, 0, 255, 255]);
   assert.throws(() => toneMapToRgba8(linear, 3, 1), /Float32Array of 12 floats/);
@@ -78,4 +78,27 @@ test('an .npy file has a 64-byte aligned version 1.0 header, shape (height, widt
   assert.deepEqual(decoded.shape, [height, width, 4]);
   assert.ok(decoded.data.equals(Buffer.from(pixels.buffer)));
   assert.throws(() => encodeNpy(pixels, 4, 2), /Float32Array of 32 floats/);
+});
+
+test('toneMapToRgba8 writes the coverage alpha and un-premultiplies the colour of a partly covered pixel', () => {
+  const halfCoveredRadiance = 0.18 * 0.5;
+  const linear = new Float32Array([
+    0.18, 0.18, 0.18, 1,
+    halfCoveredRadiance, halfCoveredRadiance, halfCoveredRadiance, 0.5,
+    0, 0, 0, 0,
+  ]);
+  const mapped = toneMapToRgba8(linear, 3, 1);
+  const opaqueByte = displayByte(0.18);
+  assert.deepEqual(Array.from(mapped.subarray(0, 4)), [opaqueByte, opaqueByte, opaqueByte, 255]);
+  // A half-covered grey edge is the same grey with alpha 128, not a darker one: that is what stops the halo.
+  assert.deepEqual(Array.from(mapped.subarray(4, 8)), [opaqueByte, opaqueByte, opaqueByte, 128]);
+  assert.deepEqual(Array.from(mapped.subarray(8, 12)), [0, 0, 0, 0]);
+});
+
+test('the npy writer carries the alpha float of each pixel unchanged', () => {
+  const linear = new Float32Array([0.1, 0.2, 0.3, 0.25, 0, 0, 0, 0]);
+  const decoded = decodeNpy(encodeNpy(linear, 2, 1));
+  const view = new DataView(decoded.data.buffer, decoded.data.byteOffset, decoded.data.byteLength);
+  assert.equal(view.getFloat32(3 * 4, true), 0.25);
+  assert.equal(view.getFloat32(7 * 4, true), 0);
 });
