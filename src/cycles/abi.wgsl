@@ -53,6 +53,12 @@ const KERNEL_FLAG_PATH_REGENERATION: u32 = 1024u;
 // stores mip levels is read at the level the footprint asks for. Clear (default): every texture is read at level 0, as Blender
 // Cycles does.
 const KERNEL_FLAG_TEXTURE_MIPS: u32 = 2048u;
+// Profiling only (`profileSkip` of the packer): each bit leaves out one part of the direct lighting so its share of the
+// sampling time can be measured. The picture is wrong with any of them set.
+const KERNEL_FLAG_PROFILE_NO_SHADOW_RAYS: u32 = 8192u;
+const KERNEL_FLAG_PROFILE_NO_ENVIRONMENT_SAMPLE: u32 = 16384u;
+const KERNEL_FLAG_PROFILE_NO_LIGHT_SAMPLE: u32 = 32768u;
+const KERNEL_FLAG_PROFILE_NO_DIRECT_EVAL: u32 = 65536u;
 
 // `KernelParamsV2.filter_type` values.
 const FILTER_BOX: u32 = 0u;

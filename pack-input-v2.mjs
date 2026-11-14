@@ -54,6 +54,13 @@ export const KERNEL_FLAG_LIGHT_TREE_PROBE = 128;
 const KERNEL_FLAG_TEST_NEE_ONLY = 256;
 const KERNEL_FLAG_TEST_BSDF_ONLY = 512;
 export const VALID_DIRECT_LIGHTING = Object.freeze(['both', 'nee-only', 'bsdf-only']);
+/** Profiling only: parts of the direct lighting that `profileSkip` can leave out, and their kernel flag (abi.wgsl). */
+export const PROFILE_SKIP_FLAGS = Object.freeze({
+  'shadow-rays': 8192,
+  'environment-sample': 16384,
+  'light-sample': 32768,
+  'direct-eval': 65536,
+});
 const KERNEL_FLAG_HAS_VOLUME = 2;
 const KERNEL_FLAG_HAS_SUBSURFACE = 4;
 const KERNEL_FLAG_ORTHOGRAPHIC_CAMERA = 8;
@@ -2336,6 +2343,19 @@ function packKernelParamsV2({
   const { sampler, lightSampling } = resolveSamplingOptions(options, 'packKernelParamsV2');
   if (options.directLighting !== undefined && !VALID_DIRECT_LIGHTING.includes(options.directLighting)) {
     throw new RangeError(`packKernelParamsV2: \`directLighting\` must be "both", "nee-only" or "bsdf-only", got ${JSON.stringify(options.directLighting)}.`);
+  }
+  if (options.profileSkip !== undefined) {
+    if (!Array.isArray(options.profileSkip)) {
+      throw new TypeError('packKernelParamsV2: `profileSkip` must be an array of part names.');
+    }
+    for (const partName of options.profileSkip) {
+      if (!Object.hasOwn(PROFILE_SKIP_FLAGS, partName)) {
+        throw new RangeError(
+          `packKernelParamsV2: \`profileSkip\` takes ${Object.keys(PROFILE_SKIP_FLAGS).map((name) => `"${name}"`).join(', ')}, got ${JSON.stringify(partName)}.`
+        );
+      }
+      kernelFlags |= PROFILE_SKIP_FLAGS[partName];
+    }
   }
   if (options.directLighting === 'nee-only') {
     kernelFlags |= KERNEL_FLAG_TEST_NEE_ONLY;

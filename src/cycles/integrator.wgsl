@@ -237,6 +237,9 @@ fn int_trace_shadow(
   target_triangle: u32,
   path_transparent_bounces: u32,
 ) -> vec3<f32> {
+  if ((kernel_params.kernel_flags & KERNEL_FLAG_PROFILE_NO_SHADOW_RAYS) != 0u) {
+    return vec3<f32>(1.0);
+  }
   let step_eps = max(kernel_params.ray_epsilon, 1.0e-6);
   let shadow_t_max = select(1.0e30, max(max_distance - step_eps, 0.0), max_distance < 1.0e29);
   var transmittance = vec3<f32>(1.0);
@@ -1069,6 +1072,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         if ((kernel_params.kernel_flags & KERNEL_FLAG_TEST_BSDF_ONLY) != 0u) {
           break;
         }
+        let profile_skips_source = select(KERNEL_FLAG_PROFILE_NO_LIGHT_SAMPLE, KERNEL_FLAG_PROFILE_NO_ENVIRONMENT_SAMPLE, direct_source == 2u);
+        if ((kernel_params.kernel_flags & profile_skips_source) != 0u) {
+          continue;
+        }
         var direct_sample: LgtDirectSample;
         direct_sample.valid = 0u;
         direct_sample.pdf = 0.0;
@@ -1100,6 +1107,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             smp_seek(&rng, step, SMP_SLOT_ENVIRONMENT);
             direct_sample = lgt_sample_environment(point.position, smp_next_4d(&rng));
           }
+        }
+        if ((kernel_params.kernel_flags & KERNEL_FLAG_PROFILE_NO_DIRECT_EVAL) != 0u) {
+          // Keep the sample alive so the compiler cannot drop the work of drawing it.
+          sample_radiance += vec3<f32>(direct_sample.pdf * 1.0e-30);
+          continue;
         }
         int_accumulate_direct_sample(direct_sample, &closure, &point, wo, throughput, medium_sigma, in_medium, bounce, transparent_bounces, &sample_radiance);
       }
