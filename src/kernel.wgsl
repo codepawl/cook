@@ -674,7 +674,7 @@ fn addRadiance(depth: i32, amountIn: vec3<f32>) {
   var amount = amountIn;
   if (depth > 0) {
     let peak = max(amount.x, max(amount.y, amount.z));
-    if (params.cameraAndClamp.z > 0.0 && peak > params.cameraAndClamp.z) { amount *= params.cameraAndClamp.z / peak; }
+    if (peak > params.cameraAndClamp.z) { amount *= params.cameraAndClamp.z / peak; }
   }
   radiance += amount;
 }

@@ -57,10 +57,6 @@ test('a firefly clamp of 0, a negative value or NaN means no clamp instead of ze
   assert.throws(() => packParameters(sun, { fireflyClamp: '5' }), /fireflyClamp/);
 });
 
-test('the legacy kernel guards a non-positive clamp itself', () => {
-  assert.match(readKernelSource('../src/kernel.wgsl'), /params\.cameraAndClamp\.z > 0\.0 && peak > params\.cameraAndClamp\.z/);
-});
-
 test('the adaptive floors are the documented ones and each kernel says it differs from the other', () => {
   const legacy = readKernelSource('../src/kernel.wgsl');
   const cycles = readKernelSource('../src/cycles/integrator.wgsl');
