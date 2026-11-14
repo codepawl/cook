@@ -36,7 +36,8 @@ fn cam_sample_regular_polygon(blades: u32, rotation: f32, rand_uv: vec2<f32>) ->
   let weight_a = 1.0 - su;
   let weight_b = rand_uv.y * su;
   let step_angle = TWO_PI / corners;
-  let angle_0 = rotation + corner_index * step_angle;
+  // Cycles builds each triangle from (cos t, +-sin t) with t = pi / corners, so its polygon vertices sit at odd multiples of t.
+  let angle_0 = rotation + 0.5 * step_angle + corner_index * step_angle;
   let angle_1 = angle_0 + step_angle;
   let vertex_0 = vec2<f32>(cos(angle_0), sin(angle_0));
   let vertex_1 = vec2<f32>(cos(angle_1), sin(angle_1));
