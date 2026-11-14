@@ -493,6 +493,9 @@ fn closure_thin_glass_fresnel(
 // lobe_count doubles as the candidate count until closure_build finishes.
 fn closure_add_candidate(closure: ptr<function, Closure>, scratch: ptr<function, array<Lobe, CLOSURE_SCRATCH_LOBES>>, lobe: Lobe) {
   let slot = (*closure).lobe_count;
+  if (slot >= CLOSURE_CANDIDATE_CAPACITY) {
+    return;
+  }
   if (CLOSURE_PRUNES_CANDIDATES) {
     (*scratch)[slot] = lobe;
   } else {
@@ -513,6 +516,7 @@ fn closure_build(point: ptr<function, ShadingPoint>, wo: vec3<f32>) -> Closure {
   closure.total_sample_weight = 0.0;
   closure.geometric_normal = (*point).geometric_normal;
   closure.front_face = (*point).front_face;
+  closure.smooth_normal = bsdf_mf_safe_normalize_fallback((*point).shading_normal, (*point).geometric_normal);
 
   let wo_len_sq = dot(wo, wo);
   if (wo_len_sq <= 1e-16) {
@@ -933,6 +937,16 @@ fn closure_eval_single_lobe(lobe: ptr<function, Lobe>, wi: vec3<f32>, wo: vec3<f
   return BsdfMfEval(vec3<f32>(0.0), 0.0);
 }
 
+// Cycles bump_shadowing_term: a direction below the smooth surface but above a bump-perturbed lobe normal gets no light.
+// Returns false when the lobe must be zeroed. A lobe whose normal equals the smooth normal is never affected.
+fn closure_passes_bump_shadowing(lobe_normal: vec3<f32>, smooth_normal: vec3<f32>, wi: vec3<f32>) -> bool {
+  if (all(lobe_normal == smooth_normal)) {
+    return true;
+  }
+  let product = dot(smooth_normal, wi) * dot(smooth_normal, lobe_normal) * dot(lobe_normal, wi);
+  return product >= 0.0;
+}
+
 fn closure_eval(closure: ptr<function, Closure>, wi: vec3<f32>, wo: vec3<f32>) -> ClosureEval {
   if ((*closure).lobe_count == 0u || (*closure).total_sample_weight <= 0.0) {
     return ClosureEval(vec3<f32>(0.0), 0.0);
@@ -943,6 +957,9 @@ fn closure_eval(closure: ptr<function, Closure>, wi: vec3<f32>, wo: vec3<f32>) -
   for (var i: u32 = 0u; i < (*closure).lobe_count; i = i + 1u) {
     var lobe_copy = (*closure).lobes[i];
     if (lobe_copy.sample_weight <= 0.0 || lobe_copy.lobe_type == LOBE_TRANSPARENT) {
+      continue;
+    }
+    if (SCENE_HAS_NORMAL_MAP && !closure_passes_bump_shadowing(lobe_copy.normal, (*closure).smooth_normal, wi)) {
       continue;
     }
     let lobe_prob = lobe_copy.sample_weight * inv_total_w;

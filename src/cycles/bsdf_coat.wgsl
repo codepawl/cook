@@ -71,7 +71,7 @@ fn bsdf_coat_setup_lobe(
   lobe.thin_film_thickness = 0.0;
   lobe.thin_film_ior = 0.0;
 
-  var coat_albedo = vec3<f32>(albedo_scalar);
+  let coat_albedo = vec3<f32>(albedo_scalar);
   if (preserve_energy) {
     lobe.flags = lobe.flags | LOBE_FLAG_MULTISCATTER;
     let fss = vec3<f32>(bsdf_mf_fresnel_dielectric_fss(safe_ior));
@@ -79,7 +79,6 @@ fn bsdf_coat_setup_lobe(
     lobe.weight = lobe.weight * pres.xyz;
     lobe.sample_weight = lobe.sample_weight * bsdf_mf_average(pres.xyz);
     lobe.diffuse_roughness = pres.w;
-    coat_albedo = coat_albedo * pres.xyz;
   }
 
   let layer_albedo = (vec3<f32>(1.0) - angled_tint * (vec3<f32>(1.0) - coat_albedo)) * coat_weight_vec;

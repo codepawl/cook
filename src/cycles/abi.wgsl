@@ -109,7 +109,7 @@ const ALPHA_MODE_BLEND: u32 = 2u;
 
 // Closure lobe capacity and `Lobe.lobe_type` discriminants.
 const MAX_CLOSURE_LOBES: u32 = 4u; // SPECIALIZE_LOBES
-const MAX_CLOSURE_CANDIDATES: u32 = 7u; // SPECIALIZE_CANDIDATES
+const MAX_CLOSURE_CANDIDATES: u32 = 9u; // SPECIALIZE_CANDIDATES
 const CLOSURE_PRUNES_CANDIDATES: bool = MAX_CLOSURE_CANDIDATES > MAX_CLOSURE_LOBES;
 const CLOSURE_SCRATCH_LOBES: u32 = select(1u, MAX_CLOSURE_CANDIDATES, CLOSURE_PRUNES_CANDIDATES);
 // How many lobes `closure_add_candidate` can take before the closure is built.
@@ -553,6 +553,9 @@ struct Closure {
 
   geometric_normal: vec3<f32>,
   front_face: u32,
+
+  // Interpolated normal before any normal or bump map; the bump shadowing term compares lobe normals against it.
+  smooth_normal: vec3<f32>,
 }
 
 // Return value of `closure_eval`: cosine-foreshortened BSDF value `f(wo, wi) * |dot(N, wi)|` and solid-angle mixture PDF.

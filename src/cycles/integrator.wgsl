@@ -227,6 +227,70 @@ fn int_volume_segment_overlap(ray_origin: vec3<f32>, ray_dir: vec3<f32>, min_t: 
   return vec2<f32>(t_enter, t_exit);
 }
 
+// Cycles turns the smooth transmission of a thin-walled Principled material into a transparent closure for rays that are not
+// camera rays, so a shadow ray crosses a smooth thin pane and loses the Fresnel transmittance instead of stopping. Returns the
+// factor the ray keeps, or zero when the material is not a smooth thin pane (rough thin glass stays an occluder, as in Cycles).
+// Vertex colours and shader graphs are not read here: the tint is the material colour times its base colour texture.
+fn int_thin_glass_shadow_transmittance(
+  instance: InstanceRecord,
+  triangle: TriangleRecord,
+  material: MaterialRecord,
+  barycentrics: vec2<f32>,
+  ray_dir: vec3<f32>,
+) -> vec3<f32> {
+  if (!SCENE_HAS_GLASS || (material.flags & MATERIAL_FLAG_THIN_WALLED) == 0u) {
+    return vec3<f32>(0.0);
+  }
+  let uvs = int_interpolate_triangle_uvs(triangle, barycentrics);
+  var transmission_weight = clamp(material.transmission_weight, 0.0, 1.0);
+  if (material.transmission_tex >= 0) {
+    transmission_weight = clamp(transmission_weight * texture_sample(material.transmission_tex, uvs.uv0, uvs.uv1).r, 0.0, 1.0);
+  }
+  var roughness = clamp(material.roughness, 0.0, 1.0);
+  var metallic = clamp(material.metallic, 0.0, 1.0);
+  if (material.metallic_roughness_tex >= 0) {
+    let metallic_roughness = texture_sample(material.metallic_roughness_tex, uvs.uv0, uvs.uv1);
+    roughness = clamp(roughness * metallic_roughness.g, 0.0, 1.0);
+    metallic = clamp(metallic * metallic_roughness.b, 0.0, 1.0);
+  }
+  let transmission_layer_weight = transmission_weight * (1.0 - metallic);
+  if (transmission_layer_weight <= CLOSURE_WEIGHT_CUTOFF) {
+    return vec3<f32>(0.0);
+  }
+  let base_alpha = roughness * roughness;
+  let transmission_alpha = closure_thin_glass_transmission_alpha(base_alpha, max(material.ior, 1e-5));
+  if (!bsdf_mf_is_singular(transmission_alpha, transmission_alpha)) {
+    return vec3<f32>(0.0);
+  }
+
+  var base_color = max(material.base_color, vec3<f32>(0.0));
+  if (material.base_color_tex >= 0) {
+    base_color = max(base_color * texture_sample(material.base_color_tex, uvs.uv0, uvs.uv1).rgb, vec3<f32>(0.0));
+  }
+  var specular_tint = max(material.f82_tint, vec3<f32>(0.0));
+  if ((material.flags & MATERIAL_FLAG_F82_METALLIC) == 0u && all(specular_tint == vec3<f32>(0.0))) {
+    specular_tint = vec3<f32>(1.0);
+  }
+  let thin_film_thickness = select(0.0, material.thin_film_thickness, SCENE_HAS_THIN_FILM);
+  let thin_film_ior = select(0.0, max(material.thin_film_ior, 1e-5), thin_film_thickness > BSDF_MF_THINFILM_CUTOFF);
+
+  let raw_normal = cross(int_transform_vector(instance, triangle.edge1), int_transform_vector(instance, triangle.edge2));
+  let normal_length = length(raw_normal);
+  var cos_incidence = 1.0;
+  if (normal_length > 1.0e-16) {
+    cos_incidence = abs(dot(ray_dir, raw_normal / normal_length));
+  }
+  let fresnel = closure_thin_glass_fresnel(
+    specular_tint,
+    clamp(base_color, vec3<f32>(0.0), vec3<f32>(1.0)),
+    max(material.ior, 1e-5),
+    thin_film_thickness,
+    thin_film_ior,
+    cos_incidence,
+  );
+  return fresnel.transmittance * transmission_layer_weight;
+}
+
 fn int_trace_shadow(
   ray_origin: vec3<f32>,
   ray_dir: vec3<f32>,
@@ -315,6 +379,16 @@ fn int_trace_shadow(
           current_t_min = committed.t + step_eps;
           continue;
         }
+      }
+      let thin_glass_transmittance = int_thin_glass_shadow_transmittance(hit_inst, hit_tri, hit_mat, committed.barycentrics, ray_dir);
+      if (any(thin_glass_transmittance > vec3<f32>(0.0))) {
+        if (transparent_hits >= kernel_params.max_transparent_bounces) {
+          return vec3<f32>(0.0);
+        }
+        transmittance *= thin_glass_transmittance;
+        transparent_hits += 1u;
+        current_t_min = committed.t + step_eps;
+        continue;
       }
       return vec3<f32>(0.0);
     }
@@ -966,7 +1040,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         min_ray_pdf = min(phase_pdf, min_ray_pdf);
         prev_recv_lo = 0xFFFFFFFFu;
         prev_recv_hi = 0xFFFFFFFFu;
-        lgt_remember_mis_origin(scatter_pos, ray_dir, false, false);
+        lgt_remember_volume_mis_origin(scatter_pos, ray_dir);
         path_active = true;
         continue;
       }
@@ -1199,12 +1273,22 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       camera_visible_environment = camera_visible_environment && is_transmission && !is_diffuse_transmission && is_singular;
       is_camera_ray = false;
       is_transparent_bg_ray = false;
-      mis_skip = is_singular;
-      prev_bsdf_pdf = bsdf_sample.pdf;
       min_ray_pdf = min(bsdf_sample.pdf, min_ray_pdf);
-      prev_recv_lo = point.light_group_mask_lo;
-      prev_recv_hi = point.light_group_mask_hi;
-      lgt_remember_mis_origin(point.position, point.shading_normal, closure_has_transmission, picks_through_tree);
+      // A shadow ray crosses a smooth thin pane (int_thin_glass_shadow_transmittance), so the surface behind it already
+      // takes a light sample through the pane. The ray that crosses the pane by its BSDF keeps the MIS state of that surface
+      // and does not start a new one, as Cycles does for its transparent closure; resetting it would count a light twice.
+      let crosses_smooth_thin_pane = SCENE_HAS_GLASS
+        && (material.flags & MATERIAL_FLAG_THIN_WALLED) != 0u
+        && is_singular
+        && bsdf_sample.sampled_lobe_type == LOBE_GLOSSY_GGX
+        && cos_ng_wi < 0.0;
+      if (!crosses_smooth_thin_pane) {
+        mis_skip = is_singular;
+        prev_bsdf_pdf = bsdf_sample.pdf;
+        prev_recv_lo = point.light_group_mask_lo;
+        prev_recv_hi = point.light_group_mask_hi;
+        lgt_remember_mis_origin(point.position, point.shading_normal, closure_has_transmission, picks_through_tree);
+      }
       path_active = true;
     }
 

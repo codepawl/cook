@@ -146,6 +146,14 @@ fn base_layer_lobe_bound(inputs: &BaseLayerInputs) -> u32 {
     lobes
 }
 
+/// The most lobes `closure_build` can add before it prunes to `MAX_CLOSURE_LOBES`: transparent, sheen, coat, metal, two
+/// thin-glass lobes, specular, diffuse and diffuse transmission. The scratch array of `closure_build` has this many slots.
+const MAX_CLOSURE_CANDIDATE_LOBES: u32 = 9;
+
+fn clamp_candidate_lobes(candidate_lobes: u32) -> u32 {
+    candidate_lobes.clamp(1, MAX_CLOSURE_CANDIDATE_LOBES)
+}
+
 /// Checks that the counts the specializer reads from the napi input equal the counts the kernel reads from
 /// `kernel_params`, so the specialized flags and lobe bounds describe the data the shader really walks.
 pub(crate) fn check_counts_match_kernel_params(input: &NativeTraceInputV2) -> Result<()> {
@@ -320,7 +328,7 @@ pub(crate) fn scan_scene_specialization(input: &NativeTraceInputV2) -> SceneSpec
     let has_diffuse_transmission = mat_count > 0 && mats.len() >= 2 * mat_count * MATERIAL_RECORD_STRIDE;
     let diffuse_transmission_lobe = u32::from(has_diffuse_transmission);
     let mut max_closure_lobes: u32 = if mat_count > 0 { 1 } else { 4 };
-    let mut max_closure_candidates: u32 = if mat_count > 0 { 1 } else { 7 };
+    let mut max_closure_candidates: u32 = if mat_count > 0 { 1 } else { MAX_CLOSURE_CANDIDATE_LOBES };
 
     for m in 0..mat_count {
         let base = m * MATERIAL_RECORD_STRIDE;
@@ -394,7 +402,7 @@ pub(crate) fn scan_scene_specialization(input: &NativeTraceInputV2) -> SceneSpec
             thin_walled: (flags & MATERIAL_FLAG_THIN_WALLED) != 0,
         });
         let candidate_lobes = trans_lobe + sheen_lobe + coat_lobe + base_lobes + diffuse_transmission_lobe;
-        max_closure_candidates = max_closure_candidates.max(candidate_lobes.clamp(1, 7));
+        max_closure_candidates = max_closure_candidates.max(clamp_candidate_lobes(candidate_lobes));
         max_closure_lobes = max_closure_lobes.max(candidate_lobes.clamp(1, 4));
     }
 
@@ -549,9 +557,9 @@ pub(crate) fn specialize_kernel_source(source: &str, scene: &SceneSpecialization
             &format!("const MAX_CLOSURE_LOBES: u32 = {max_closure_lobes}u; // SPECIALIZE_LOBES"),
         );
     }
-    if max_closure_candidates < 7 {
+    if max_closure_candidates < MAX_CLOSURE_CANDIDATE_LOBES {
         result = result.replace(
-            "const MAX_CLOSURE_CANDIDATES: u32 = 7u; // SPECIALIZE_CANDIDATES",
+            "const MAX_CLOSURE_CANDIDATES: u32 = 9u; // SPECIALIZE_CANDIDATES",
             &format!("const MAX_CLOSURE_CANDIDATES: u32 = {max_closure_candidates}u; // SPECIALIZE_CANDIDATES"),
         );
     }
@@ -677,7 +685,7 @@ mod specialization_tests {
                       const SCENE_HAS_LIGHT_LINKING: bool = true;\n\
                       const SCENE_HAS_LIGHT_TREE: bool = true;\n\
                       const MAX_CLOSURE_LOBES: u32 = 4u; // SPECIALIZE_LOBES
-                      const MAX_CLOSURE_CANDIDATES: u32 = 7u; // SPECIALIZE_CANDIDATES";
+                      const MAX_CLOSURE_CANDIDATES: u32 = 9u; // SPECIALIZE_CANDIDATES";
         let result = specialize_cycles_kernel(source, &input);
         assert!(result.contains("const SCENE_HAS_VOLUME: bool = false;"), "VOLUME should be false");
         assert!(result.contains("const SCENE_HAS_GLASS: bool = false;"), "GLASS should be false");
@@ -976,6 +984,163 @@ fn ").unwrap_or(sample_body.len());
             lobes += 2;
         }
         lobes
+    }
+
+    #[test]
+    fn a_thin_walled_material_with_every_layer_gets_all_its_candidate_slots() {
+        let inputs = BaseLayerInputs { thin_walled: true, ..opaque_inputs(0.5, 0.5) };
+        let base_lobes = base_layer_lobe_bound(&inputs);
+        assert_eq!(base_lobes, 5);
+        // Transparent, sheen and coat on top of the base layers.
+        assert_eq!(clamp_candidate_lobes(base_lobes + 3), 8);
+        // Diffuse transmission adds the ninth.
+        assert_eq!(clamp_candidate_lobes(base_lobes + 4), 9);
+        assert_eq!(clamp_candidate_lobes(0), 1);
+        assert_eq!(clamp_candidate_lobes(12), MAX_CLOSURE_CANDIDATE_LOBES);
+    }
+
+    fn layered_thin_walled_material() -> Vec<u8> {
+        let mut material = make_mat(0.5, 0.5, 0.5, 0.0, 0.0, MATERIAL_FLAG_THIN_WALLED, ALPHA_MODE_BLEND, -1, -1);
+        material[MAT_METALLIC_BYTE..MAT_METALLIC_BYTE + 4].copy_from_slice(&0.5f32.to_bits().to_le_bytes());
+        material
+    }
+
+    fn zero_float_field(material: &mut [u8], byte_offset: usize) {
+        material[byte_offset..byte_offset + 4].copy_from_slice(&0.0f32.to_bits().to_le_bytes());
+    }
+
+    #[test]
+    fn a_packed_thin_walled_material_with_every_layer_scans_to_eight_candidates_and_nine_with_the_extension() {
+        let kernel_params = make_kp(0, 0.0, 0, 0, 0.0);
+        let instance = make_default_inst();
+        let light = make_default_light();
+        let material = layered_thin_walled_material();
+
+        let plain = dummy_input(&kernel_params, &material, &light, &instance);
+        assert_eq!(scan_scene_specialization(&plain).max_closure_candidates, 8);
+
+        let mut with_extension_table = material.clone();
+        with_extension_table.extend_from_slice(&vec![0u8; MATERIAL_RECORD_STRIDE]);
+        let mut with_extension = dummy_input(&kernel_params, &with_extension_table, &light, &instance);
+        with_extension.material_count = 1;
+        assert_eq!(scan_scene_specialization(&with_extension).max_closure_candidates, 9);
+    }
+
+    #[test]
+    fn the_candidate_slot_count_is_rewritten_for_every_scene_under_nine() {
+        let kernel_params = make_kp(0, 0.0, 0, 0, 0.0);
+        let source = "const MAX_CLOSURE_CANDIDATES: u32 = 9u; // SPECIALIZE_CANDIDATES";
+        let instance = make_default_inst();
+        let light = make_default_light();
+
+        let widest_eight = dummy_input(&kernel_params, &layered_thin_walled_material(), &light, &instance);
+        assert!(specialize_cycles_kernel(source, &widest_eight).contains("= 8u;"));
+
+        let mut without_sheen = layered_thin_walled_material();
+        zero_float_field(&mut without_sheen, MAT_SHEEN_WEIGHT_BYTE);
+        let widest_seven = dummy_input(&kernel_params, &without_sheen, &light, &instance);
+        assert_eq!(scan_scene_specialization(&widest_seven).max_closure_candidates, 7);
+        assert!(specialize_cycles_kernel(source, &widest_seven).contains("= 7u;"));
+
+        let mut extension_table = layered_thin_walled_material();
+        extension_table.extend_from_slice(&vec![0u8; MATERIAL_RECORD_STRIDE]);
+        let mut widest_nine = dummy_input(&kernel_params, &extension_table, &light, &instance);
+        widest_nine.material_count = 1;
+        assert_eq!(specialize_cycles_kernel(source, &widest_nine), source);
+    }
+
+    #[test]
+    fn the_kernel_default_candidate_count_matches_the_host_bound() {
+        let kernel = assemble_cycles_kernel().expect("the kernel assembles");
+        assert!(kernel.contains(&format!(
+            "const MAX_CLOSURE_CANDIDATES: u32 = {MAX_CLOSURE_CANDIDATE_LOBES}u; // SPECIALIZE_CANDIDATES"
+        )));
+    }
+
+    #[test]
+    fn a_normal_mapped_lobe_is_zeroed_below_the_smooth_surface_by_the_bump_shadowing_term() {
+        let kernel = assemble_cycles_kernel().expect("the kernel assembles");
+        let function_start = kernel.find("fn closure_passes_bump_shadowing(").expect("the bump shadowing term exists");
+        let function_body = &kernel[function_start..];
+        assert!(function_body.contains("if (all(lobe_normal == smooth_normal)) {\n    return true;"), "an unmapped lobe is never affected");
+        assert!(function_body.contains("dot(smooth_normal, wi) * dot(smooth_normal, lobe_normal) * dot(lobe_normal, wi)"));
+        assert!(function_body.contains("return product >= 0.0;"));
+
+        let build_start = kernel.find("fn closure_build(").expect("the closure builder exists");
+        assert!(kernel[build_start..].contains("closure.smooth_normal = bsdf_mf_safe_normalize_fallback((*point).shading_normal, (*point).geometric_normal);"));
+
+        let eval_start = kernel.find("fn closure_eval(").expect("the closure evaluation exists");
+        let eval_body = &kernel[eval_start..];
+        let gate = eval_body
+            .find("if (SCENE_HAS_NORMAL_MAP && !closure_passes_bump_shadowing(lobe_copy.normal, (*closure).smooth_normal, wi)) {")
+            .expect("the term is gated by the normal map constant");
+        let lobe_eval = eval_body.find("closure_eval_single_lobe(&lobe_copy, wi, wo)").expect("the lobe is evaluated");
+        assert!(gate < lobe_eval, "the lobe is skipped before it is evaluated");
+    }
+
+    #[test]
+    fn a_shadow_ray_crosses_a_smooth_thin_pane_and_the_bsdf_ray_keeps_the_mis_state() {
+        let kernel = assemble_cycles_kernel().expect("the kernel assembles");
+        let transmittance_start = kernel.find("fn int_thin_glass_shadow_transmittance(").expect("the pane transmittance exists");
+        let shadow_start = kernel.find("fn int_trace_shadow(").expect("the shadow trace exists");
+        let transmittance_body = &kernel[transmittance_start..shadow_start];
+        assert!(
+            transmittance_body.contains("if (!bsdf_mf_is_singular(transmission_alpha, transmission_alpha)) {\n    return vec3<f32>(0.0);"),
+            "rough thin glass stays an occluder"
+        );
+
+        let shadow_body = &kernel[shadow_start..];
+        let pane_call = shadow_body
+            .find("int_thin_glass_shadow_transmittance(hit_inst, hit_tri, hit_mat, committed.barycentrics, ray_dir)")
+            .expect("an opaque hit asks whether it is a smooth thin pane");
+        let multiply = shadow_body.find("transmittance *= thin_glass_transmittance;").expect("the pane tints the shadow ray");
+        assert!(pane_call < multiply);
+
+        let crossing_start = kernel.find("let crosses_smooth_thin_pane = ").expect("the integrator detects a crossing of the pane");
+        let crossing_body = &kernel[crossing_start..];
+        let guard = crossing_body.find("if (!crosses_smooth_thin_pane) {").expect("the MIS state is guarded");
+        let set_skip = crossing_body.find("mis_skip = is_singular;").expect("a normal bounce sets mis_skip");
+        let set_pdf = crossing_body.find("prev_bsdf_pdf = bsdf_sample.pdf;").expect("a normal bounce sets the pdf");
+        let set_origin = crossing_body.find("lgt_remember_mis_origin(point.position").expect("a normal bounce sets the origin");
+        assert!(guard < set_skip && guard < set_pdf && guard < set_origin);
+    }
+
+    #[test]
+    fn the_light_hit_weights_of_every_light_kind_follow_the_strategy_flags() {
+        let kernel = assemble_cycles_kernel().expect("the kernel assembles");
+        let weight_start = kernel.find("fn lgt_strategy_weight(").expect("the strategy weight exists");
+        let weight_body = &kernel[weight_start..];
+        let nee_only = weight_body.find("KERNEL_FLAG_TEST_NEE_ONLY").expect("NEE-only is read");
+        let bsdf_only = weight_body.find("KERNEL_FLAG_TEST_BSDF_ONLY").expect("BSDF-only is read");
+        let power = weight_body.find("lgt_power_heuristic(prev_bsdf_pdf, pdf_nee)").expect("the default is the power heuristic");
+        assert!(nee_only < bsdf_only && bsdf_only < power);
+
+        let analytic_start = kernel.find("fn lgt_eval_analytic_lights_along_segment(").expect("the analytic light evaluation exists");
+        let escaped_start = kernel.find("fn lgt_eval_escaped_ray(").expect("the escaped ray evaluation exists");
+        let emissive_start = kernel.find("fn lgt_emissive_surface_weight(").expect("the emissive weight exists");
+        let analytic_and_escaped = &kernel[analytic_start..emissive_start];
+        assert!(escaped_start > analytic_start);
+        assert!(
+            !analytic_and_escaped.contains("lgt_power_heuristic("),
+            "analytic lights, the sun and the environment must go through lgt_strategy_weight"
+        );
+
+        let volume_start = kernel.find("fn lgt_remember_volume_mis_origin(").expect("the volume origin setter exists");
+        assert!(kernel[volume_start..].contains("lgt_mis_is_volume_origin = true;"));
+        assert!(
+            kernel.contains("|| lgt_mis_is_volume_origin) {\n    return 1.0;"),
+            "a ray from a volume scatter has no light sample to share the weight with"
+        );
+    }
+
+    #[test]
+    fn the_coat_albedo_that_dims_the_base_ignores_the_energy_preserving_scale() {
+        let kernel = assemble_cycles_kernel().expect("the kernel assembles");
+        let setup_start = kernel.find("fn bsdf_coat_setup_lobe(").expect("the coat setup exists");
+        let setup_end = setup_start + kernel[setup_start..].find("\n}").expect("the coat setup ends");
+        let setup_body = &kernel[setup_start..setup_end];
+        assert!(setup_body.contains("let coat_albedo = vec3<f32>(albedo_scalar);"));
+        assert!(!setup_body.contains("coat_albedo = coat_albedo * pres.xyz"));
     }
 
     #[test]
