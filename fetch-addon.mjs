@@ -3,7 +3,7 @@
 // builds one addon per supported system and a `.sha256` file next to each; the download is refused when the hash differs.
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const PACKAGE_DIRECTORY = dirname(fileURLToPath(import.meta.url));
@@ -109,4 +109,15 @@ export async function fetchPrebuiltAddon({ platform = process.platform, arch = p
   const partialPath = `${addonPath}.partial`;
   writeAddonAtomically(partialPath, addonPath, addonBytes);
   return addonPath;
+}
+
+/**
+ * The warning to print after a download when COOK_ADDON_PATH names a different addon than the one just written, or null when
+ * the override is unset or is the downloaded file.
+ */
+export function describeAddonOverrideWarning(overridePath, downloadedPath) {
+  if (!overridePath || resolve(overridePath) === resolve(downloadedPath)) {
+    return null;
+  }
+  return `cook: COOK_ADDON_PATH is set to ${overridePath}, so cook keeps using that addon, not the one just downloaded. Unset it to use the download.`;
 }

@@ -6,10 +6,10 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { download, writeAddonAtomically } from '../fetch-addon.mjs';
+import { describeAddonOverrideWarning, download, writeAddonAtomically } from '../fetch-addon.mjs';
 import { createNativeSession, resolveSessionFrame, traceNative } from '../index.mjs';
 import { decodePackFile, encodePackFile } from '../pack-file.mjs';
-import { buildNativeInputV2, validatePackOptions } from '../pack-input-v2.mjs';
+import { buildNativeInputV2, createTextureCollector, packMaterialRecordV2, validatePackOptions } from '../pack-input-v2.mjs';
 import { buildRoomInput } from '../tools/make-fixture-pack.mjs';
 
 const PACKAGE_DIRECTORY = fileURLToPath(new URL('..', import.meta.url));
@@ -137,6 +137,12 @@ test('traceNative refuses a size that squashes the packed camera and accepts the
       (error) => error instanceof RangeError && /the camera has a width to height ratio of .* but the image is 100x100/.test(error.message),
     );
     assert.doesNotThrow(() => traceNative(input, { kernel: 'cycles', width: 160, height: 120, samples: 8 }));
+    assert.doesNotThrow(() => traceNative(input, { kernel: 'cycles', width: 4, height: 3, samples: 8 }));
+    assert.throws(
+      () => traceNative(input, { kernel: 'cycles', width: 4, height: 4, samples: 8 }),
+      (error) => error instanceof RangeError && /but the image is 4x4/.test(error.message),
+    );
+    assert.doesNotThrow(() => traceNative(input, { kernel: 'cycles', width: 10, height: 8, samples: 8 }));
   } finally {
     if (previousAddonPath === undefined) delete process.env.COOK_ADDON_PATH;
     else process.env.COOK_ADDON_PATH = previousAddonPath;
@@ -164,6 +170,10 @@ test('an output path that is a folder is refused before any work', () => {
   assert.match(result.stderr, /is a folder\. Give a file name ending in \.png or \.npy/);
 });
 
+function partialFilesOf(outputName) {
+  return readdirSync(WORK_DIRECTORY).filter((name) => name.startsWith(outputName) && name.endsWith('.partial'));
+}
+
 function writeFakeAddon(name, traceBody) {
   const addonPath = pathInWork(name);
   writeFileSync(addonPath, `module.exports = { traceSceneCycles(input, options) { ${traceBody} } };`);
@@ -176,7 +186,7 @@ test('the picture is written through a partial file that is gone afterwards', ()
   const result = runCook(['render', FIXTURE_PATH, '--output', outputPath], { COOK_ADDON_PATH: addonPath });
   assert.equal(result.status, 0, result.stderr);
   assert.ok(existsSync(outputPath));
-  assert.equal(existsSync(`${outputPath}.partial`), false);
+  assert.deepEqual(partialFilesOf('atomic.png'), []);
 });
 
 test('a failed trace leaves neither the output nor a partial file', () => {
@@ -185,7 +195,28 @@ test('a failed trace leaves neither the output nor a partial file', () => {
   const result = runCook(['render', FIXTURE_PATH, '--output', outputPath], { COOK_ADDON_PATH: addonPath });
   assert.equal(result.status, 1);
   assert.equal(existsSync(outputPath), false);
-  assert.equal(existsSync(`${outputPath}.partial`), false);
+  assert.deepEqual(partialFilesOf('failed.png'), []);
+});
+
+test('a user file named like the old partial path is not overwritten or deleted', () => {
+  const addonPath = writeFakeAddon('fake-reserved.cjs', 'return { rgba: new Float32Array(options.width * options.height * 4), tracedSeconds: 0.1, adapter: "fake" };');
+  const outputPath = pathInWork('reserved.png');
+  writeFileSync(`${outputPath}.partial`, 'keep me');
+  const result = runCook(['render', FIXTURE_PATH, '--output', outputPath], { COOK_ADDON_PATH: addonPath });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(`${outputPath}.partial`, 'utf8'), 'keep me');
+  assert.ok(existsSync(outputPath));
+});
+
+test('the CLI renders every size it derives from one side of the packed ratio', () => {
+  const addonPath = writeFakeAddon('fake-derived.cjs', 'return { rgba: new Float32Array(options.width * options.height * 4), tracedSeconds: 0.1, adapter: "fake" };');
+  const expectedSizes = [['10', '10 x 8'], ['333', '333 x 250']];
+  for (const [width, expectedSize] of expectedSizes) {
+    const outputPath = pathInWork(`derived-${width}.npy`);
+    const result = runCook(['render', FIXTURE_PATH, '--width', width, '--output', outputPath], { COOK_ADDON_PATH: addonPath });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, new RegExp(`rendered ${expectedSize},`));
+  }
 });
 
 function packWithStoredValue(name, mutate) {
@@ -258,7 +289,28 @@ test('a write that fails removes the partial file and names the fix', () => {
   assert.ok(readdirSync(blockedTarget).includes('keep.txt'));
 });
 
-test('fetch-addon warns when COOK_ADDON_PATH keeps another addon in use', () => {
-  const source = readFileSync(CLI_PATH, 'utf8');
-  assert.match(source, /COOK_ADDON_PATH is set to .*keeps using that addon/);
+test('fetch-addon warns only when COOK_ADDON_PATH names another addon than the download', () => {
+  const downloadedPath = pathInWork('downloaded.node');
+  assert.match(describeAddonOverrideWarning(pathInWork('other.node'), downloadedPath), /COOK_ADDON_PATH is set to .*other\.node, so cook keeps using that addon/);
+  assert.equal(describeAddonOverrideWarning(undefined, downloadedPath), null);
+  assert.equal(describeAddonOverrideWarning('', downloadedPath), null);
+  assert.equal(describeAddonOverrideWarning(downloadedPath, downloadedPath), null);
+});
+
+test('an instanced scene with reduced materials accepts indices up to the record count', () => {
+  const textureCollector = createTextureCollector();
+  const materialRecords = [{}, {}, {}].map((material) => packMaterialRecordV2(material, textureCollector));
+  const scene = triangleScene({}, { materialIndex: 2 });
+  assert.doesNotThrow(() => pack(scene, { reducedMaterials: { materialRecords, textureCollector } }));
+  const overridden = triangleScene({}, { materialIndex: 1, materialOverride: 2 });
+  assert.doesNotThrow(() => pack(overridden, { reducedMaterials: { materialRecords, textureCollector } }));
+  assert.throws(
+    () => pack(triangleScene({}, { materialIndex: 3 }), { reducedMaterials: { materialRecords, textureCollector } }),
+    /`materialIndex` must be a whole number from 0 to 2, got 3/,
+  );
+});
+
+test('materialOverride 0xffffffff means no override', () => {
+  assert.doesNotThrow(() => pack(triangleScene({}, { materialOverride: 0xffffffff })));
+  assert.throws(() => pack(triangleScene({}, { materialOverride: 7 })), /`materialOverride` must be a whole number from 0 to 0, got 7/);
 });

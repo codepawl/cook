@@ -8,7 +8,7 @@ import { describeEngine, isTimeLimitError } from '../engine.mjs';
 import { COOK_PACK_REVISION_CODE, loadNativeAddon, traceNative } from '../index.mjs';
 import { PackFileError, decodePackFile, describePackFile } from '../pack-file.mjs';
 import { validatePackOptions } from '../pack-input-v2.mjs';
-import { fetchPrebuiltAddon } from '../fetch-addon.mjs';
+import { describeAddonOverrideWarning, fetchPrebuiltAddon } from '../fetch-addon.mjs';
 import { encodeNpy } from '../output/npy.mjs';
 import { encodePng } from '../output/png.mjs';
 import { toneMapToRgba8 } from '../output/tone-map.mjs';
@@ -95,15 +95,20 @@ function requireWritableOutputFolder(outputPath) {
   }
 }
 
+// Unique per process, so two renders to the same output do not share a partial file.
 function partialPathOf(outputPath) {
-  return `${outputPath}.partial`;
+  return `${outputPath}.${process.pid}.partial`;
 }
 
-// Creates the partial file before the trace, so an unwritable folder fails now and not after minutes of rendering.
+// Creates the partial file before the trace, so an unwritable folder fails now and not after minutes of rendering. It never
+// replaces a file that is already there.
 function reservePartialOutput(outputPath) {
   try {
-    writeFileSync(partialPathOf(outputPath), '');
+    writeFileSync(partialPathOf(outputPath), '', { flag: 'wx' });
   } catch (writeError) {
+    if (writeError.code === 'EEXIST') {
+      throw new UsageError(`--output ${JSON.stringify(outputPath)}: ${JSON.stringify(partialPathOf(outputPath))} already exists. Remove it, or give another output path.`);
+    }
     throw new UsageError(`--output ${JSON.stringify(outputPath)}: cannot create ${JSON.stringify(partialPathOf(outputPath))}: ${writeError.message}. Give a path in a writable folder.`);
   }
 }
@@ -268,7 +273,11 @@ function runRender(positionals, values) {
     }
     throw new CliFailure(`the render failed: ${traceError.message}`, EXIT_RENDER_FAILED);
   }
-  writePicture(options, result.denoisedRgba ?? result.rgba, width, height);
+  try {
+    writePicture(options, result.denoisedRgba ?? result.rgba, width, height);
+  } finally {
+    discardPartialOutput(options.outputPath);
+  }
   console.log(`rendered ${width} x ${height}, ${traceOptions.samples} samples in ${result.tracedSeconds.toFixed(2)} s on ${result.adapter}; wrote ${options.outputPath}`);
 }
 
@@ -347,9 +356,9 @@ async function runFetchAddon(rest) {
     throw new CliFailure(error.message, EXIT_NO_ADDON);
   }
   console.log(`Downloaded the prebuilt addon to ${addonPath}`);
-  const overridePath = process.env.COOK_ADDON_PATH;
-  if (overridePath && resolve(overridePath) !== resolve(addonPath)) {
-    console.warn(`cook: COOK_ADDON_PATH is set to ${overridePath}, so cook keeps using that addon, not the one just downloaded. Unset it to use the download.`);
+  const overrideWarning = describeAddonOverrideWarning(process.env.COOK_ADDON_PATH, addonPath);
+  if (overrideWarning !== null) {
+    console.warn(overrideWarning);
   }
 }
 

@@ -335,7 +335,7 @@ function joinMipLevels(levelZeroWords, mipChain) {
  * that is filtered linearly and has more than one texel; a texture can say `mips: true` or `mips: false` to differ from that.
  * The default is level 0 only, which is what Blender Cycles reads.
  */
-function createTextureCollector({ textureMips, texturePoolMaxBytes } = {}) {
+export function createTextureCollector({ textureMips, texturePoolMaxBytes } = {}) {
   validateTextureMipsOption(textureMips, 'textureMips', 'createTextureCollector');
   const poolMaxBytes = validateTexturePoolMaxBytes(texturePoolMaxBytes, 'createTextureCollector');
   const indexByKey = new Map();
@@ -2240,6 +2240,8 @@ const KERNEL_PARAMS_V2_CAMERA_FAR_BYTE_OFFSET = 140;
 const KERNEL_PARAMS_V2_CAMERA_BYTE_LENGTH = 80;
 const MAX_SEED = 0xffffffff;
 const ASPECT_RELATIVE_TOLERANCE = 1e-3;
+// Half a pixel, plus the float32 rounding of the camera words, so the exact half-pixel case of a rounded size passes.
+const HALF_PIXEL_TOLERANCE = 0.5 + 1e-4;
 
 // The camera fields a block holds, which a camera-only update keeps for every field the caller leaves out.
 function readHeldCameraWords(view) {
@@ -2284,7 +2286,12 @@ export function validateSeedOption(seed, callerName) {
 function requireCameraMatchesAspect(cameraWords, width, height, callerName) {
   const cameraAspect = Math.hypot(...cameraWords.scaledRight) / Math.hypot(...cameraWords.scaledUp);
   const imageAspect = width / height;
-  if (!Number.isFinite(cameraAspect) || Math.abs(cameraAspect - imageAspect) > ASPECT_RELATIVE_TOLERANCE * imageAspect) {
+  const withinRelativeTolerance = Math.abs(cameraAspect - imageAspect) <= ASPECT_RELATIVE_TOLERANCE * imageAspect;
+  // A size derived from the camera's ratio by rounding the missing side is off by at most half a pixel on that side.
+  const withinHalfPixelOfWidth = Math.abs(width - height * cameraAspect) <= HALF_PIXEL_TOLERANCE;
+  const withinHalfPixelOfHeight = Math.abs(height - width / cameraAspect) <= HALF_PIXEL_TOLERANCE;
+  const matches = withinRelativeTolerance || withinHalfPixelOfWidth || withinHalfPixelOfHeight;
+  if (!Number.isFinite(cameraAspect) || !matches) {
     throw new RangeError(
       `${callerName}: the camera has a width to height ratio of ${cameraAspect} but the image is ${width}x${height} (${imageAspect}). Build the camera with createCamera(view, ${width}, ${height}) for this image size, or pass \`width\` and \`height\` of the frame.`
     );
@@ -2839,18 +2846,19 @@ function packInstancedGeometry(instancesInput, rawMaterials, textureCollector, r
       throw new TypeError(`Instance[${instIdx}] requires a geometry with positions and indices.`);
     }
     const instanceLabel = `Instance[${instIdx}]`;
-    requireWholeIndexInRange(inst.materialIndex ?? 0, rawMaterials.length, instanceLabel, '`materialIndex`');
-    if (inst.materialOverride !== undefined) {
-      requireWholeIndexInRange(inst.materialOverride, rawMaterials.length, instanceLabel, '`materialOverride`');
+    requireWholeIndexInRange(inst.materialIndex ?? 0, partRecords.length, instanceLabel, '`materialIndex`');
+    const overridesMaterial = inst.materialOverride !== undefined && inst.materialOverride !== INVALID_INDEX_V2;
+    if (overridesMaterial) {
+      requireWholeIndexInRange(inst.materialOverride, partRecords.length, instanceLabel, '`materialOverride`');
     }
     const defaultMaterialIndex = recordIndexOf(Number(inst.materialIndex ?? 0));
-    let materialOverride = inst.materialOverride !== undefined
+    let materialOverride = overridesMaterial
       ? recordIndexOf(inst.materialOverride >>> 0)
       : (inst.overrideMaterial === true ? (defaultMaterialIndex >>> 0) : INVALID_INDEX_V2);
 
     let meshSlot = meshCache.get(geometry);
     if (!meshSlot) {
-      validateGeometryForPacking(geometry, `${instanceLabel} geometry`, rawMaterials.length);
+      validateGeometryForPacking(geometry, `${instanceLabel} geometry`, partRecords.length);
       const blasIndex = meshCache.size;
       const triCount = Math.floor(geometry.indices.length / 3);
       const forceNonOpaque = forceNonOpaqueGeometries.has(geometry);
