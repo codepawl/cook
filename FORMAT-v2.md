@@ -394,7 +394,7 @@ A texture stores levels only when `textureMips: true` is passed to the packer (o
 `film_accumulation` holds `4 * image_width * image_height` elements of `vec4<f32>` (`64 bytes` per pixel across 4 contiguous planes of length `pixel_count = image_width * image_height`):
 
 1. **Plane 0 (`0 .. pixel_count`)**: `[sum_r, sum_g, sum_b, sum_depth]`
-2. **Plane 1 (`pixel_count .. 2 * pixel_count`)**: `[sum_albedo_r, sum_albedo_g, sum_albedo_b, 0.0]`
+2. **Plane 1 (`pixel_count .. 2 * pixel_count`)**: `[sum_albedo_r, sum_albedo_g, sum_albedo_b, sum_background_coverage]`. `sum_background_coverage` adds 1 for each sample whose camera path ended on the transparent background (`kernel_flags` bit `32`, the flag still set at the escape, so the path crossed only transparent surfaces) and 0 for every other sample; the `cycles` kernel is the only writer, the others leave it 0
 3. **Plane 2 (`2 * pixel_count .. 3 * pixel_count`)**: `[sum_normal_x, sum_normal_y, sum_normal_z, 0.0]`
 4. **Plane 3 (`3 * pixel_count .. 4 * pixel_count`)**: `[sum_luminance, sum_luminance_sq, converged_flag, sample_count]`
 
