@@ -148,6 +148,47 @@ export function resolveHdriRadianceLimit(hdriRadianceLimit, callerName) {
   return hdriRadianceLimit;
 }
 const SUN_DEFAULT_HALF_ANGLE = Math.PI / 360;
+// Below this the f32 cosine of the half angle rounds to exactly 1.0 (about 2.44e-4 rad), the kernel can no
+// longer tell a cone from a delta light and the radiance color / (pi sin^2) overcounts by about 1 / solid angle.
+// It is also the smallest radius Crucible accepts.
+const SUN_MIN_NONZERO_HALF_ANGLE = 5e-4;
+const SUN_MAX_HALF_ANGLE = Math.PI / 2;
+
+// A v1 pack stores only the cosine, so a nonzero radius under the minimum is f32 rounding noise: lift it.
+function resolveReconstructedSunRadius(radius) {
+  return radius > 0 && radius < SUN_MIN_NONZERO_HALF_ANGLE ? SUN_MIN_NONZERO_HALF_ANGLE : Math.min(radius, SUN_MAX_HALF_ANGLE);
+}
+
+function resolveSunHalfAngle(angularRadius) {
+  if (angularRadius === undefined) {
+    return SUN_DEFAULT_HALF_ANGLE;
+  }
+  const halfAngle = Number(angularRadius);
+  const withinRange = halfAngle === 0 || (halfAngle >= SUN_MIN_NONZERO_HALF_ANGLE && halfAngle <= SUN_MAX_HALF_ANGLE);
+  if (!Number.isFinite(halfAngle) || !withinRange) {
+    throw new RangeError(
+      `lights.sun.angularRadius must be 0 (a delta sun) or a finite angle in radians from ${SUN_MIN_NONZERO_HALF_ANGLE} to ${SUN_MAX_HALF_ANGLE}, got ${String(angularRadius)}. ` +
+      `Pass 0.00465 for the real sun, or 0 for a point-like sun that casts hard shadows.`,
+    );
+  }
+  return halfAngle;
+}
+
+// A scalar strength, like Blender's Normal Map node. The two-value glTF form [x, y] is accepted only when
+// both values are equal, because the kernel has one strength for both tangent axes.
+function resolveNormalScale(normalScale) {
+  if (Array.isArray(normalScale) || ArrayBuffer.isView(normalScale)) {
+    const scaleX = Number(normalScale[0] ?? 1);
+    const scaleY = Number(normalScale[1] ?? 1);
+    if (!Number.isFinite(scaleX) || !Number.isFinite(scaleY) || Math.abs(scaleX) !== Math.abs(scaleY)) {
+      throw new RangeError(
+        `material.normalScale [${scaleX}, ${scaleY}] has two different strengths, but the kernel scales both tangent axes by one value. Pass a single number, or two equal numbers.`,
+      );
+    }
+    return Math.abs(scaleX);
+  }
+  return Number(normalScale ?? 1);
+}
 const IDENTITY_MATRIX_4X4 = Object.freeze([
   1, 0, 0, 0,
   0, 1, 0, 0,
@@ -467,6 +508,13 @@ export function createTextureCollector({ textureMips, texturePoolMaxBytes } = {}
       packedWords = new Uint32Array(floatBuffer);
     } else if (format === TEXTURE_FORMAT_RG16_FLOAT) {
       const halfData = data instanceof Uint16Array ? data : new Uint16Array(data);
+      const expectedHalfCount = pixelCount * 2;
+      if (halfData.length !== expectedHalfCount) {
+        throw new RangeError(
+          `A ${width}x${height} half-float texture needs ${expectedHalfCount} 16-bit values (two half-float bit patterns per texel), but \`data\` has ${halfData.length}. ` +
+          'A Uint16Array is read as half-float bits, never as 16-bit integers: pass a Float32Array of normalised values for 8-bit-per-channel-style 16-bit data, or exactly width * height * 2 half-float words.',
+        );
+      }
       const wordCount = Math.ceil(pixelCount / 1);
       const alignedWords = Math.ceil(wordCount / 4) * 4;
       packedWords = new Uint32Array(alignedWords);
@@ -836,9 +884,7 @@ export function packMaterialRecordV2(material = {}, textureCollector = null) {
   const { emissionColor, emissionStrength } = resolveEmissionFields(material);
   const subsurface = resolveSubsurfaceFields(material, baseColor);
   const diffuseTransmission = resolveDiffuseTransmission(material);
-  const normalScale = Array.isArray(material.normalScale) || ArrayBuffer.isView(material.normalScale)
-    ? 0.5 * (Math.abs(Number(material.normalScale[0] ?? 1)) + Math.abs(Number(material.normalScale[1] ?? 1)))
-    : Number(material.normalScale ?? 1);
+  const normalScale = resolveNormalScale(material.normalScale);
   const coatNormalScale = Number(material.coatNormalScale ?? 1);
   const bumpDistance = Math.max(0, Number(material.bumpDistance ?? 0));
 
@@ -1291,7 +1337,7 @@ function buildAnalyticLightEntries(lightsSection = {}) {
       const towardSun = normalizeVec3(sun.direction, [0, 1, 0]);
       const emissionDirection = [-towardSun[0], -towardSun[1], -towardSun[2]];
       const { axisU, axisV } = orthonormalBasis(emissionDirection);
-      const halfAngle = Math.max(0, Number(sun.angularRadius ?? SUN_DEFAULT_HALF_ANGLE));
+      const halfAngle = resolveSunHalfAngle(sun.angularRadius);
       const cosHalfAngle = Math.cos(halfAngle);
       const sinHalfAngle = Math.sin(halfAngle);
       const discFactor = sinHalfAngle > 1e-7 ? Math.PI * sinHalfAngle * sinHalfAngle : 1;
@@ -3395,7 +3441,8 @@ export function reduceV1MaterialTable({ materials: matSource, atlas: atlasWords,
     const clearcoatRoughness = matSource[base + 9];
     const transmission = matSource[base + 10];
     const ior = matSource[base + 11] > 0 ? matSource[base + 11] : 1.5;
-    const normalScale = [matSource[base + 12] || 1, matSource[base + 13] || 1];
+    // A v1 pack may hold two different axis strengths; the upgrade keeps the old mean of the two.
+    const normalScale = 0.5 * (Math.abs(matSource[base + 12] || 1) + Math.abs(matSource[base + 13] || 1));
     const alphaCutoff = matSource[base + 14];
     const maskLo = ((Math.round(matSource[base + 15]) & 0xffff) | ((Math.round(matSource[base + 16]) & 0xffff) << 16)) >>> 0;
     materialLightMasks.push(maskLo);
@@ -3645,7 +3692,7 @@ export function upgradeNativeInputV1ToV2(v1Input, options = {}, carriedFields = 
       bit: 0,
       direction: [paramF32[16], paramF32[17], paramF32[18]],
       color: [paramF32[20], paramF32[21], paramF32[22]],
-      angularRadius: Math.acos(cosSun),
+      angularRadius: resolveReconstructedSunRadius(Math.acos(cosSun)),
     };
   }
   const lightFloats = v1Input.lights;

@@ -272,14 +272,21 @@ fn closure_apply_normal_map(
   let desc = texture_descriptors[u32(tex_index)];
   let format = desc.format_and_sampler & 0xFFu;
   let texel = closure_sample_texture(tex_index, point).rgb;
-  let nx = (texel.x * 2.0 - 1.0) * strength;
-  let ny = (texel.y * 2.0 - 1.0) * strength;
+  let nx = texel.x * 2.0 - 1.0;
+  let ny = texel.y * 2.0 - 1.0;
   var nz = texel.z * 2.0 - 1.0;
   if (format == 3u) {
-    nz = sqrt(max(0.0, 1.0 - (texel.x * 2.0 - 1.0) * (texel.x * 2.0 - 1.0) - (texel.y * 2.0 - 1.0) * (texel.y * 2.0 - 1.0)));
+    nz = sqrt(max(0.0, 1.0 - nx * nx - ny * ny));
   }
   let mapped = tangent * nx + bitangent * ny + base_normal * nz;
-  return bsdf_mf_safe_normalize_fallback(mapped, base_normal);
+  let full_strength_normal = bsdf_mf_safe_normalize_fallback(mapped, base_normal);
+  if (strength == 1.0) {
+    return full_strength_normal;
+  }
+  // Cycles' Normal Map node: mix the mapped normal with the surface normal by the strength (values above 1
+  // push past the mapped normal), then normalise. Strength 1 returns above, so default renders are unchanged.
+  let blended = base_normal + (full_strength_normal - base_normal) * strength;
+  return bsdf_mf_safe_normalize_fallback(blended, base_normal);
 }
 
 fn closure_apply_bump_map(

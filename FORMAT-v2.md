@@ -229,7 +229,7 @@ Includes all Principled BSDF v2 fields needed for Cycles parity:
 | `172` | `4` | `4` | `f32` | `subsurface_anisotropy` | Subsurface phase anisotropy `[-0.9, 0.9]` |
 | `176` | `4` | `4` | `f32` | `sheen_roughness` | Principled v2 microfiber sheen roughness `[0, 1]` |
 | `180` | `4` | `4` | `f32` | `subsurface_ior` | Subsurface boundary IOR (default `1.4`) |
-| `184` | `4` | `4` | `f32` | `normal_scale` | Base normal map strength (default `1.0`) |
+| `184` | `4` | `4` | `f32` | `normal_scale` | Base normal map strength (default `1.0`), applied as Cycles' Normal Map node does: the unit mapped normal is mixed with the surface normal by the strength and normalised (`normalize(N + (n_mapped - N) * strength)`; above `1` it extrapolates; `1` leaves the mapped normal untouched). One value for both tangent axes: the packer refuses a two-value `normalScale` whose entries differ |
 | `188` | `4` | `4` | `f32` | `coat_normal_scale` | Clearcoat normal map strength (default `1.0`) |
 | `192` | `4` | `4` | `u32` | `flags` | Bitmask: `1=MULTISCATTER_GGX`, `2=THIN_WALLED`, `4=TRANSPARENT_SHADOW`, `8=DOUBLE_SIDED`, `16=EMISSIVE_MIS`, `32=F82_METALLIC`, `64=HAS_SHADER_GRAPH` |
 | `196` | `4` | `4` | `u32` | `alpha_mode` | `0=OPAQUE`, `1=MASK`, `2=BLEND` |
@@ -307,7 +307,7 @@ Convention: `direction` is always the **unit emission direction pointing from th
 | `60` | `4` | `4` | `f32` | `size_u` | Full width in metres (`area_rect`) or major diameter (`area_disk`) |
 | `64` | `12` | `16` | `vec3<f32>` | `axis_v` | Unit bitangent axis V (`cross(direction, axis_u)`) |
 | `76` | `4` | `4` | `f32` | `size_v` | Full height in metres (`area_rect`) or minor diameter (`area_disk`) |
-| `80` | `4` | `4` | `f32` | `cos_half_angle` | `cos(spot_size * 0.5)` for `spot`; `cos(sun_angle * 0.5)` for `sun` |
+| `80` | `4` | `4` | `f32` | `cos_half_angle` | `cos(spot_size * 0.5)` for `spot`; `cos(sun_angle * 0.5)` for `sun`. The packer takes a sun `angularRadius` of `0` (delta sun) or `5e-4` to `pi/2` rad: a smaller angle rounds this f32 to exactly `1.0` and the sun would be about `1 / solid_angle` too bright |
 | `84` | `4` | `4` | `f32` | `spot_blend` | Cycles spot softness blend `[0, 1]` |
 | `88` | `4` | `4` | `f32` | `tan_half_spread` | `tan(spread * 0.5)` for Cycles area beam spread |
 | `92` | `4` | `4` | `f32` | `spread_normalization` | Cycles area beam spread normalization multiplier |
@@ -374,6 +374,8 @@ The emitter cone axis is not stored: it is the `direction` of the light, or the 
 ## 8. Texture Descriptors — `TextureDescriptor` (`@binding(8)`)
 
 Total stride: **32 bytes** (`2 × 16 B`), alignment: **16 bytes**.
+
+**Typed-array inputs.** The packer picks the texel format from the array class: `Uint8Array` / `Uint8ClampedArray` are RGBA8, `Float32Array` is RGBA32F (1 to 4 channels per texel), and `Uint16Array` is RG16F, which holds raw IEEE half-float bit patterns, two per texel, so its length must be exactly `width * height * 2` (the packer throws a `RangeError` otherwise). A `Uint16Array` is never read as 16-bit integers: pass 16-bit integer data as a `Float32Array` after normalising.
 
 | Byte Offset | Size (B) | Alignment (B) | WGSL Type | Field | Description |
 | ---: | ---: | ---: | :--- | :--- | :--- |
