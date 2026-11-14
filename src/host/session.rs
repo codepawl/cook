@@ -14,7 +14,7 @@ use crate::host::accel::{
     INSTANCE_RECORD_BYTES, TRIANGLE_FLOATS, TRIANGLE_RECORD_BYTES,
 };
 use crate::host::dispatch::{next_tile, DispatchPlanner, TileBudgetPlanner, DISPATCH_BUDGET_SECONDS};
-use crate::host::device::{failure, layout_entry, open_device, storage_buffer, storage_entry};
+use crate::host::device::{check_buffer_sizes_fit, failure, layout_entry, open_device, run_in_error_scopes, storage_buffer, storage_entry};
 use crate::host::film::{image_accumulation_bytes, read_accumulation};
 use crate::host::textures::upload_scene_buffers;
 use crate::{NativeTraceInput, NativeTraceInputV2, ProbeCyclesLobeOptions};
@@ -69,10 +69,13 @@ struct CachedDevice {
     adapter_name: String,
     backend_name: String,
     features: String,
-    /// Set by the device lost callback; the next call then opens a fresh device and drops everything below.
+    /// Set only by the device lost callback; the next call then opens a fresh device and drops everything below.
     device_lost: Arc<AtomicBool>,
-    /// What wgpu reported when it lost the device or rejected work, for the error a failed render raises.
+    /// What wgpu said when it lost the device, for the error a failed render raises.
     device_error: Arc<Mutex<String>>,
+    /// The first validation or out of memory error wgpu reported outside an error scope since a caller last took it.
+    /// It does not mark the device lost: the buffers of other sessions on this device are still healthy.
+    uncaptured_error: Arc<Mutex<Option<String>>>,
     /// Static 118,848-byte LUT storage buffer for Cycles binding 12.
     lut_buffer: wgpu::Buffer,
     /// Bind group layout for the Cycles kernel (bindings 0..=12).
@@ -158,15 +161,10 @@ pub(crate) fn get_cached_device() -> Result<(wgpu::Device, wgpu::Queue, String, 
             }
             lost_flag.store(true, Ordering::SeqCst);
         });
-        // The default handler panics on a lost device; record the report so the render can raise a readable error.
-        let error_flag = Arc::clone(&device_lost);
-        let error_message = Arc::clone(&device_error);
-        device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
-            if let Ok(mut stored) = error_message.lock() {
-                stored.push_str(&error.to_string());
-            }
-            error_flag.store(true, Ordering::SeqCst);
-        }));
+        // The default handler panics; keep the first report so the call that caused it can raise a readable error.
+        let uncaptured_error = Arc::new(Mutex::new(None));
+        let error_slot = Arc::clone(&uncaptured_error);
+        device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| store_first_error(&error_slot, &error.to_string())));
         let mut lut_words: Vec<u32> = CYCLES_LUT_WORDS.to_vec();
         lut_words.extend(unit_filter_table_words());
         let lut_bytes: &[u8] = bytemuck::cast_slice(&lut_words);
@@ -185,6 +183,7 @@ pub(crate) fn get_cached_device() -> Result<(wgpu::Device, wgpu::Queue, String, 
             features: if has_ray_query { "EXPERIMENTAL_RAY_QUERY".to_string() } else { String::new() },
             device_lost,
             device_error,
+            uncaptured_error,
             lut_buffer,
             cycles_bind_group_layout,
             cycles_pipelines: BoundedCache::new(MAX_CACHED_PIPELINES),
@@ -200,11 +199,33 @@ pub(crate) fn get_cached_device() -> Result<(wgpu::Device, wgpu::Queue, String, 
     ))
 }
 
-/// The flag and message the device callbacks fill in when the cached device is lost.
-fn cached_device_loss_state() -> Result<(Arc<AtomicBool>, Arc<Mutex<String>>)> {
+/// Longest error text kept from wgpu; a validation report can list every buffer of a scene.
+const MAX_STORED_ERROR_CHARACTERS: usize = 2000;
+
+/// Stores the first error text in `slot` (capped) and drops later ones, which usually repeat the first.
+fn store_first_error(slot: &Mutex<Option<String>>, message: &str) {
+    if let Ok(mut stored) = slot.lock() {
+        if stored.is_none() {
+            *stored = Some(message.chars().take(MAX_STORED_ERROR_CHARACTERS).collect());
+        }
+    }
+}
+
+/// What the device callbacks fill in: the lost flag, the lost message and the first uncaptured error.
+struct CachedDeviceReports {
+    device_lost: Arc<AtomicBool>,
+    device_error: Arc<Mutex<String>>,
+    uncaptured_error: Arc<Mutex<Option<String>>>,
+}
+
+fn cached_device_reports() -> Result<CachedDeviceReports> {
     let guard = lock_device_cache();
     match guard.as_ref() {
-        Some(cached) => Ok((Arc::clone(&cached.device_lost), Arc::clone(&cached.device_error))),
+        Some(cached) => Ok(CachedDeviceReports {
+            device_lost: Arc::clone(&cached.device_lost),
+            device_error: Arc::clone(&cached.device_error),
+            uncaptured_error: Arc::clone(&cached.uncaptured_error),
+        }),
         None => Err(cache_was_reset_failure()),
     }
 }
@@ -239,15 +260,21 @@ pub(crate) fn get_or_compile_cycles_pipeline_on(
         compile_compute_pipeline(device, specialized_source, entry_point, layout)
     })??;
     let mut guard = lock_device_cache();
-    if let Some(ref mut cached) = *guard {
-        cached.cycles_pipelines.insert(key, compiled.clone());
-    }
+    // Another thread may have replaced a lost device while this one compiled; a pipeline of the old device must not enter the new cache.
+    let cached = guard.as_mut().ok_or_else(cache_was_reset_failure)?;
+    check_same_device(cached, expected_device)?;
+    cached.cycles_pipelines.insert(key, compiled.clone());
     Ok(compiled)
 }
 
 fn check_same_device(cached: &CachedDevice, expected_device: Option<&Arc<AtomicBool>>) -> Result<()> {
+    check_same_device_flag(&cached.device_lost, expected_device)
+}
+
+/// The lost flag identifies a device: a caller that expects one device fails when the cache holds another.
+fn check_same_device_flag(cached_flag: &Arc<AtomicBool>, expected_device: Option<&Arc<AtomicBool>>) -> Result<()> {
     match expected_device {
-        Some(expected) if !Arc::ptr_eq(&cached.device_lost, expected) => Err(failure(
+        Some(expected) if !Arc::ptr_eq(cached_flag, expected) => Err(failure(
             "The GPU device this session was created on has been replaced. Close the session and create a new one.",
         )),
         _ => Ok(()),
@@ -284,12 +311,22 @@ pub(crate) struct CyclesDeviceContext {
     pub(crate) features: String,
     pub(crate) device_lost: Arc<AtomicBool>,
     pub(crate) device_error: Arc<Mutex<String>>,
+    pub(crate) uncaptured_error: Arc<Mutex<Option<String>>>,
 }
 
 pub(crate) fn get_cycles_device_context() -> Result<CyclesDeviceContext> {
     let (device, queue, adapter_name, backend_name, features) = get_cached_device()?;
-    let (device_lost, device_error) = cached_device_loss_state()?;
-    Ok(CyclesDeviceContext { device, queue, adapter_name, backend_name, features, device_lost, device_error })
+    let reports = cached_device_reports()?;
+    Ok(CyclesDeviceContext {
+        device,
+        queue,
+        adapter_name,
+        backend_name,
+        features,
+        device_lost: reports.device_lost,
+        device_error: reports.device_error,
+        uncaptured_error: reports.uncaptured_error,
+    })
 }
 
 const PARAMETER_BYTES: usize = 16 * 16;
@@ -323,6 +360,7 @@ pub(crate) struct PreparedScene {
     pub(crate) bind_group: wgpu::BindGroup,
     pub(crate) accumulation: wgpu::Buffer,
     pub(crate) parameters: wgpu::Buffer,
+    pub(crate) uncaptured_error: Arc<Mutex<Option<String>>>,
     pub(crate) adapter_name: String,
     pub(crate) backend_name: String,
     pub(crate) features: String,
@@ -345,6 +383,7 @@ pub(crate) struct CyclesDispatchTarget<'a> {
     pub(crate) accumulation: &'a wgpu::Buffer,
     pub(crate) device_lost: &'a AtomicBool,
     pub(crate) device_error: &'a Mutex<String>,
+    pub(crate) uncaptured_error: &'a Mutex<Option<String>>,
 }
 
 /// What one kind of job adds to the shared scene setup: the kernel text, its entry point, the accumulation size and the
@@ -521,6 +560,26 @@ pub(crate) fn create_cycles_bind_group(
     })
 }
 
+/// Refuses a legacy or texel input whose largest tables do not fit one storage buffer of the device.
+fn check_legacy_buffers_fit(
+    input: &NativeTraceInput,
+    triangle_data: &[f32],
+    shape: &JobShape<'_>,
+    limits: &wgpu::Limits,
+) -> Result<()> {
+    let mut tables: Vec<(&str, u64)> = vec![
+        ("triangles", triangle_data.len() as u64 * 4),
+        ("materials", input.materials.len() as u64 * 4),
+        ("lights", input.lights.len() as u64 * 4),
+        ("texture atlas", input.atlas.len() as u64 * 4),
+        ("film accumulation", shape.accumulation_bytes),
+    ];
+    for (label, bytes) in &shape.extra_buffers {
+        tables.push((*label, bytes.len() as u64));
+    }
+    check_buffer_sizes_fit(&tables, limits)
+}
+
 pub(crate) fn prepare_scene(input: &NativeTraceInput, shape: JobShape) -> Result<PreparedScene> {
     let setup_started = Instant::now();
     let triangle_count = input.triangle_count as usize;
@@ -531,7 +590,9 @@ pub(crate) fn prepare_scene(input: &NativeTraceInput, shape: JobShape) -> Result
     if input.parameters.len() != PARAMETER_BYTES {
         return Err(failure("The parameter block must be 256 bytes."));
     }
-    let (device, queue, adapter_info) = open_device()?;
+    // The cached device has the uncaptured error handler; a fresh one would panic and abort Node on a rejected buffer.
+    let (device, queue, adapter_name, backend_name, features) = get_cached_device()?;
+    check_legacy_buffers_fit(input, triangle_data, &shape, &device.limits())?;
     let setup_seconds = setup_started.elapsed().as_secs_f64();
 
     let compile_started = Instant::now();
@@ -546,20 +607,26 @@ pub(crate) fn prepare_scene(input: &NativeTraceInput, shape: JobShape) -> Result
 
     let upload_started = Instant::now();
     let unpacked = unpack_triangles(triangle_data, &input.materials, triangle_count);
-    let vertex_buffer = create_vertex_buffer(&device, &unpacked.vertices);
-    let uploaded = upload_scene_buffers(
-        &device,
-        input,
-        triangle_data,
-        &unpacked.slot_map,
-        unpacked.opaque_count,
-        shape.accumulation_bytes,
-        &shape.extra_buffers,
-    );
+    let uploaded_and_vertices = run_in_error_scopes(&device, "uploading the scene", || {
+        let vertex_buffer = create_vertex_buffer(&device, &unpacked.vertices);
+        let uploaded = upload_scene_buffers(
+            &device,
+            input,
+            triangle_data,
+            &unpacked.slot_map,
+            unpacked.opaque_count,
+            shape.accumulation_bytes,
+            &shape.extra_buffers,
+        );
+        (vertex_buffer, uploaded)
+    })?;
+    let (vertex_buffer, uploaded) = uploaded_and_vertices;
     let upload_seconds = upload_started.elapsed().as_secs_f64();
 
     let build_started = Instant::now();
-    let tlas = build_acceleration_structure(&device, &queue, &vertex_buffer, triangle_count, unpacked.opaque_count);
+    let tlas = run_in_error_scopes(&device, "building the acceleration structure", || {
+        build_acceleration_structure(&device, &queue, &vertex_buffer, triangle_count, unpacked.opaque_count)
+    })?;
     let acceleration_build_seconds = build_started.elapsed().as_secs_f64();
 
     let bind_group = create_scene_bind_group(
@@ -570,8 +637,6 @@ pub(crate) fn prepare_scene(input: &NativeTraceInput, shape: JobShape) -> Result
         &uploaded.buffers,
         &uploaded.accumulation,
     );
-    let has_ray_query = device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
-    let features = if has_ray_query { "EXPERIMENTAL_RAY_QUERY" } else { "" };
     Ok(PreparedScene {
         device,
         queue,
@@ -579,9 +644,10 @@ pub(crate) fn prepare_scene(input: &NativeTraceInput, shape: JobShape) -> Result
         bind_group,
         accumulation: uploaded.accumulation,
         parameters: uploaded.parameters,
-        adapter_name: adapter_info.name,
-        backend_name: format!("{:?}", adapter_info.backend),
-        features: features.to_string(),
+        uncaptured_error: cached_device_reports()?.uncaptured_error,
+        adapter_name,
+        backend_name,
+        features,
         setup_seconds,
         compile_seconds,
         upload_seconds,
@@ -603,6 +669,8 @@ pub(crate) fn trace_samples(
     let trace_started = Instant::now();
     let device = &prepared.device;
     let queue = &prepared.queue;
+    // An error reported before this trace belongs to an earlier job.
+    let _ = take_uncaptured_error(&prepared.uncaptured_error);
     for sample_index in 0..samples {
         queue.write_buffer(&prepared.parameters, SAMPLE_INDEX_BYTE_OFFSET, &sample_index.to_le_bytes());
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -620,6 +688,7 @@ pub(crate) fn trace_samples(
         queue.submit(Some(encoder.finish()));
         if (sample_index + 1) % SAMPLES_PER_WAIT == 0 {
             let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            fail_if_gpu_rejected_render(&prepared.uncaptured_error)?;
             if let Some(limit) = max_seconds {
                 if trace_started.elapsed().as_secs_f64() > limit {
                     return Err(failure(format!(
@@ -630,7 +699,9 @@ pub(crate) fn trace_samples(
             }
         }
     }
-    let sums = read_accumulation(device, queue, &prepared.accumulation, accumulation_bytes)?;
+    let sums = read_accumulation(device, queue, &prepared.accumulation, accumulation_bytes);
+    fail_if_gpu_rejected_render(&prepared.uncaptured_error)?;
+    let sums = sums?;
     Ok((sums, trace_started.elapsed().as_secs_f64()))
 }
 
@@ -808,6 +879,33 @@ pub(crate) struct CyclesTrace {
     pub(crate) largest_tile_pixels: Option<u64>,
 }
 
+/// Takes the first error wgpu reported outside any error scope, leaving the slot empty for the next job.
+pub(crate) fn take_uncaptured_error(slot: &Mutex<Option<String>>) -> Option<String> {
+    slot.lock().ok().and_then(|mut stored| stored.take())
+}
+
+/// Stops with the stored text when the GPU rejected a dispatch or bind group of the render, instead of returning the film
+/// the rejected work left empty.
+fn fail_if_gpu_rejected_render(slot: &Mutex<Option<String>>) -> Result<()> {
+    match take_uncaptured_error(slot) {
+        Some(reported) => Err(failure(format!(
+            "The GPU rejected the render: {reported}. Lower the image size or samples and run the render again."
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Checks a finished dispatch: a lost device first, then an error the device reported outside any error scope.
+fn fail_if_dispatch_failed(
+    target: &CyclesDispatchTarget<'_>,
+    sample_offset: u32,
+    batch_samples: u32,
+    samples: u32,
+) -> Result<()> {
+    fail_if_device_lost(target, sample_offset, batch_samples, samples)?;
+    fail_if_gpu_rejected_render(target.uncaptured_error)
+}
+
 /// Raises the error for a lost device, naming the dispatch that was running and how to lower the work per dispatch.
 fn fail_if_device_lost(
     target: &CyclesDispatchTarget<'_>,
@@ -848,6 +946,8 @@ pub(crate) fn trace_cycles_samples(
     let trace_started = Instant::now();
     let device = target.device;
     let queue = target.queue;
+    // An error reported before this render belongs to an earlier job.
+    let _ = take_uncaptured_error(target.uncaptured_error);
     let mut planner = match plan {
         DispatchPlan::TimeBudget { largest_batch } => Some(DispatchPlanner::new(DISPATCH_BUDGET_SECONDS, largest_batch)),
         DispatchPlan::Fixed(_) | DispatchPlan::TileBudget { .. } => None,
@@ -892,7 +992,7 @@ pub(crate) fn trace_cycles_samples(
         };
         if should_poll {
             let _ = device.poll(wgpu::PollType::wait_indefinitely());
-            fail_if_device_lost(target, dispatch_offset, batch_samples, end_sample)?;
+            fail_if_dispatch_failed(target, dispatch_offset, batch_samples, end_sample)?;
             if let Some(planner) = planner.as_mut() {
                 let dispatch_seconds = dispatch_started.elapsed().as_secs_f64();
                 planner.record(batch_samples, dispatch_seconds);
@@ -909,7 +1009,7 @@ pub(crate) fn trace_cycles_samples(
     }
 
     let sums = read_accumulation(device, queue, target.accumulation, accumulation_bytes);
-    fail_if_device_lost(target, end_sample.saturating_sub(largest_batch), largest_batch, end_sample)?;
+    fail_if_dispatch_failed(target, end_sample.saturating_sub(largest_batch), largest_batch, end_sample)?;
     Ok(CyclesTrace {
         sums: sums?,
         traced_seconds: trace_started.elapsed().as_secs_f64(),
@@ -945,6 +1045,7 @@ fn trace_cycles_tiles(
     let trace_started = Instant::now();
     let device = target.device;
     let queue = target.queue;
+    let _ = take_uncaptured_error(target.uncaptured_error);
     let mut planner = TileBudgetPlanner::new(budget.seconds, budget.width, budget.height, budget.largest_batch);
     let (grid_columns, grid_rows) = planner.grid();
     let end_sample = first_sample + samples;
@@ -977,7 +1078,7 @@ fn trace_cycles_tiles(
             submit_cycles_dispatch(target, (tile.columns, tile.rows));
             let _ = device.poll(wgpu::PollType::wait_indefinitely());
             let dispatch_seconds = dispatch_started.elapsed().as_secs_f64();
-            fail_if_device_lost(target, sample_offset, batch_samples, end_sample)?;
+            fail_if_dispatch_failed(target, sample_offset, batch_samples, end_sample)?;
 
             let tile_pixels = tile.pixel_count(budget.width, budget.height);
             planner.record(tile_pixels * batch_samples as u64, dispatch_seconds);
@@ -999,7 +1100,7 @@ fn trace_cycles_tiles(
     queue.write_buffer(target.parameters, CYCLES_TILE_ORIGIN_BYTE_OFFSET, &[0u8; 8]);
 
     let sums = read_accumulation(device, queue, target.accumulation, accumulation_bytes);
-    fail_if_device_lost(target, end_sample.saturating_sub(largest_batch), largest_batch, end_sample)?;
+    fail_if_dispatch_failed(target, end_sample.saturating_sub(largest_batch), largest_batch, end_sample)?;
     Ok(CyclesTrace {
         sums: sums?,
         traced_seconds: trace_started.elapsed().as_secs_f64(),
@@ -1138,6 +1239,87 @@ pub(crate) fn run_cycles_lobe_probe(options: &ProbeCyclesLobeOptions, shader_sou
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn legacy_input_with_triangle_floats(triangle_floats: usize) -> NativeTraceInput {
+        NativeTraceInput {
+            triangles: napi::bindgen_prelude::Float32Array::new(vec![0.0; triangle_floats]),
+            triangle_count: 1,
+            materials: napi::bindgen_prelude::Float32Array::new(vec![0.0; 16]),
+            lights: napi::bindgen_prelude::Float32Array::new(vec![0.0; 16]),
+            atlas: napi::bindgen_prelude::Uint32Array::new(vec![0; 4]),
+            environment_colors: napi::bindgen_prelude::Float32Array::new(vec![0.0; 4]),
+            environment_tables: napi::bindgen_prelude::Float32Array::new(vec![0.0; 4]),
+            parameters: napi::bindgen_prelude::Uint8Array::new(vec![0; PARAMETER_BYTES]),
+        }
+    }
+
+    fn legacy_shape(accumulation_bytes: u64) -> JobShape<'static> {
+        JobShape {
+            source: String::new(),
+            entry_point: "main",
+            rewrite_specialization_flags: false,
+            accumulation_bytes,
+            extra_buffers: vec![("texel points", vec![0u8; 64])],
+        }
+    }
+
+    #[test]
+    fn a_legacy_triangle_table_over_the_binding_limit_is_refused_before_any_buffer_is_made() {
+        let limits = wgpu::Limits { max_storage_buffer_binding_size: 1024, ..wgpu::Limits::default() };
+        let input = legacy_input_with_triangle_floats(400);
+        let message = check_legacy_buffers_fit(&input, &input.triangles, &legacy_shape(16), &limits).unwrap_err().reason;
+        assert!(message.contains("The triangles table needs 1600 bytes"), "{message}");
+        assert!(message.contains("limit is 1024 bytes"), "{message}");
+    }
+
+    #[test]
+    fn a_legacy_film_or_texel_buffer_over_the_limit_is_named() {
+        let limits = wgpu::Limits { max_storage_buffer_binding_size: 1024, ..wgpu::Limits::default() };
+        let input = legacy_input_with_triangle_floats(36);
+        let film_message = check_legacy_buffers_fit(&input, &input.triangles, &legacy_shape(4096), &limits).unwrap_err().reason;
+        assert!(film_message.contains("The film accumulation table needs 4096 bytes"), "{film_message}");
+        assert!(check_legacy_buffers_fit(&input, &input.triangles, &legacy_shape(512), &limits).is_ok());
+    }
+
+    #[test]
+    fn only_the_first_uncaptured_error_is_kept_and_it_is_capped() {
+        let slot = Mutex::new(None);
+        store_first_error(&slot, &"x".repeat(MAX_STORED_ERROR_CHARACTERS + 500));
+        store_first_error(&slot, "a second error");
+        let stored = slot.lock().unwrap().clone().unwrap();
+        assert_eq!(stored.chars().count(), MAX_STORED_ERROR_CHARACTERS);
+        assert!(!stored.contains("second"));
+    }
+
+    #[test]
+    fn an_uncaptured_error_does_not_set_the_device_lost_flag() {
+        let device_lost = AtomicBool::new(false);
+        let slot = Mutex::new(None);
+        store_first_error(&slot, "Validation Error: buffer too large");
+        assert!(!device_lost.load(Ordering::SeqCst));
+        assert!(slot.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_stored_uncaptured_error_fails_the_render_once_and_names_the_text() {
+        let slot = Mutex::new(None);
+        assert!(fail_if_gpu_rejected_render(&slot).is_ok());
+        store_first_error(&slot, "Validation Error: bind group rejected");
+        let message = fail_if_gpu_rejected_render(&slot).unwrap_err().reason;
+        assert!(message.contains("The GPU rejected the render: Validation Error: bind group rejected"), "{message}");
+        assert!(message.contains("Lower the image size or samples"), "{message}");
+        assert!(fail_if_gpu_rejected_render(&slot).is_ok(), "the slot is drained by the check");
+    }
+
+    #[test]
+    fn a_pipeline_is_refused_when_the_cache_moved_to_another_device() {
+        let first_device = Arc::new(AtomicBool::new(false));
+        let second_device = Arc::new(AtomicBool::new(false));
+        assert!(check_same_device_flag(&second_device, Some(&second_device)).is_ok());
+        assert!(check_same_device_flag(&second_device, None).is_ok());
+        let message = check_same_device_flag(&second_device, Some(&first_device)).unwrap_err().reason;
+        assert!(message.contains("has been replaced"), "{message}");
+    }
 
     #[test]
     fn lights_buffer_must_hold_the_emitters_and_the_portals() {

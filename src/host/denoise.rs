@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use napi::Result;
@@ -5,12 +7,21 @@ use wgpu::util::DeviceExt;
 
 use crate::host::device::{failure, layout_entry, storage_entry};
 use crate::host::film::{image_workgroups, read_accumulation};
-use crate::host::session::compile_compute_pipeline;
+use crate::host::session::{compile_compute_pipeline, take_uncaptured_error};
 
 const SHADER_SOURCE: &str = include_str!("../denoise_atrous.wgsl");
 /// The distance between the taps of each pass; the five passes cover a 61 pixel radius.
 const PASS_STEPS: [u32; 5] = [1, 2, 4, 8, 16];
 const MAXIMUM_BUFFER_BYTES: u64 = 1 << 30;
+/// Most workgroups one dispatch has in a dimension on any device; the filter dispatches a group per 8x8 pixels.
+const MAXIMUM_WORKGROUPS_PER_DIMENSION: u32 = 65_535;
+
+/// The reports of the device the filter runs on, to tell a failed filter from a finished one.
+pub(crate) struct DeviceHealth<'a> {
+    pub(crate) device_lost: &'a AtomicBool,
+    pub(crate) device_error: &'a Mutex<String>,
+    pub(crate) uncaptured_error: &'a Mutex<Option<String>>,
+}
 
 /// The guide planes of one traced image, row by row from the top (the layout `ResolvedImage` has).
 pub(crate) struct DenoiseInput<'a> {
@@ -79,6 +90,15 @@ fn validate_input(input: &DenoiseInput) -> Result<()> {
     if input.width == 0 || input.height == 0 {
         return Err(failure("The a-trous filter needs a width and a height of at least 1."));
     }
+    let (groups_x, groups_y) = image_workgroups(input.width, input.height);
+    if groups_x > MAXIMUM_WORKGROUPS_PER_DIMENSION || groups_y > MAXIMUM_WORKGROUPS_PER_DIMENSION {
+        return Err(failure(format!(
+            "The a-trous filter handles at most {} pixels per side, got {}x{}.",
+            MAXIMUM_WORKGROUPS_PER_DIMENSION * 8,
+            input.width,
+            input.height
+        )));
+    }
     if pixel_count as u64 * 16 > MAXIMUM_BUFFER_BYTES {
         return Err(failure("The image is too large for the a-trous filter's buffers."));
     }
@@ -100,9 +120,35 @@ fn validate_input(input: &DenoiseInput) -> Result<()> {
     Ok(())
 }
 
+/// Stops with the stored message when the device was lost or rejected work while the filter ran, instead of reading back
+/// a color buffer the failed filter left unfiltered or empty.
+fn fail_if_filter_failed(health: &DeviceHealth<'_>, device_was_lost: bool) -> Result<()> {
+    if let Some(reported) = take_uncaptured_error(health.uncaptured_error) {
+        return Err(failure(format!(
+            "The GPU rejected the a-trous filter ({reported}). The image is unfiltered: lower the image size and run the filter again."
+        )));
+    }
+    if !device_was_lost && health.device_lost.load(Ordering::SeqCst) {
+        let detail = health.device_error.lock().map(|stored| stored.clone()).unwrap_or_default();
+        let reported = if detail.is_empty() { "no detail from the driver".to_string() } else { detail };
+        return Err(failure(format!(
+            "The GPU device was lost while the a-trous filter ran ({reported}). Create a new session or run the filter again."
+        )));
+    }
+    Ok(())
+}
+
 /// Filters the traced colour with the a-trous wavelet filter and returns linear RGBA with alpha 1.
-pub(crate) fn atrous_denoise(device: &wgpu::Device, queue: &wgpu::Queue, input: &DenoiseInput) -> Result<DenoiseOutput> {
+pub(crate) fn atrous_denoise(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    input: &DenoiseInput,
+    health: &DeviceHealth<'_>,
+) -> Result<DenoiseOutput> {
     validate_input(input)?;
+    let device_was_lost = health.device_lost.load(Ordering::SeqCst);
+    // An error reported before this call belongs to an earlier one.
+    let _ = take_uncaptured_error(health.uncaptured_error);
     let pixel_count = input.width as u64 * input.height as u64;
 
     let compile_started = Instant::now();
@@ -179,6 +225,7 @@ pub(crate) fn atrous_denoise(device: &wgpu::Device, queue: &wgpu::Queue, input: 
     queue.submit(Some(encoder.finish()));
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
     let gpu_seconds = gpu_started.elapsed().as_secs_f64();
+    fail_if_filter_failed(health, device_was_lost)?;
 
     let readback_started = Instant::now();
     let rgba = read_accumulation(device, queue, &color, pixel_count * 16)?;
@@ -190,4 +237,53 @@ pub(crate) fn atrous_denoise(device: &wgpu::Device, queue: &wgpu::Queue, input: 
         gpu_seconds,
         readback_seconds,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn health<'a>(
+        device_lost: &'a AtomicBool,
+        device_error: &'a Mutex<String>,
+        uncaptured_error: &'a Mutex<Option<String>>,
+    ) -> DeviceHealth<'a> {
+        DeviceHealth { device_lost, device_error, uncaptured_error }
+    }
+
+    #[test]
+    fn a_width_past_the_dispatch_limit_is_refused_with_the_maximum() {
+        let width = MAXIMUM_WORKGROUPS_PER_DIMENSION * 8 + 1;
+        let input = DenoiseInput { width, height: 1, rgba: &[], albedo: &[], normal: &[], depth: &[], variance: &[] };
+        let message = validate_input(&input).unwrap_err().reason;
+        assert!(message.contains("at most 524280 pixels per side"), "{message}");
+    }
+
+    #[test]
+    fn an_uncaptured_error_during_the_filter_fails_it_with_the_message() {
+        let lost = AtomicBool::new(false);
+        let message = Mutex::new(String::new());
+        let uncaptured = Mutex::new(Some("Out of memory".to_string()));
+        let failure_message = fail_if_filter_failed(&health(&lost, &message, &uncaptured), false).unwrap_err().reason;
+        assert!(failure_message.contains("Out of memory"), "{failure_message}");
+        assert!(uncaptured.lock().unwrap().is_none(), "the report is taken so the next call starts clean");
+    }
+
+    #[test]
+    fn a_device_lost_during_the_filter_fails_it_but_an_older_loss_is_not_blamed() {
+        let lost = AtomicBool::new(true);
+        let message = Mutex::new("Unknown: TDR".to_string());
+        let uncaptured = Mutex::new(None);
+        let failure_message = fail_if_filter_failed(&health(&lost, &message, &uncaptured), false).unwrap_err().reason;
+        assert!(failure_message.contains("TDR"), "{failure_message}");
+        assert!(fail_if_filter_failed(&health(&lost, &message, &uncaptured), true).is_ok());
+    }
+
+    #[test]
+    fn a_healthy_device_lets_the_filter_finish() {
+        let lost = AtomicBool::new(false);
+        let message = Mutex::new(String::new());
+        let uncaptured = Mutex::new(None);
+        assert!(fail_if_filter_failed(&health(&lost, &message, &uncaptured), false).is_ok());
+    }
 }
