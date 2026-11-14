@@ -897,6 +897,7 @@ export function packMaterialRecordV2(material = {}, textureCollector = null) {
   }
   // A coat or sheen layer attenuates the emission a ray sees when it hits the surface, but a light sample takes the raw radiance,
   // so the two strategies would estimate different values. Such an emitter is found by rays that hit it only.
+  // A weight texture multiplies the constant weight, so it can only lower it: the constant weight alone decides the layer.
   const hasEmissionLayer = coatWeight > CLOSURE_WEIGHT_CUTOFF || sheenWeight > CLOSURE_WEIGHT_CUTOFF;
   if (emissionStrength > 0 && luminance(emissionColor) > 0 && material.emissiveMis !== false && !hasEmissionLayer) {
     flags |= MATERIAL_FLAG_EMISSIVE_MIS;
@@ -906,6 +907,10 @@ export function packMaterialRecordV2(material = {}, textureCollector = null) {
   }
   if (typeof material.flags === 'number') {
     flags = material.flags >>> 0;
+    // An explicit flags word wins, but it cannot put a layered emitter back into light sampling.
+    if (hasEmissionLayer) {
+      flags &= ~MATERIAL_FLAG_EMISSIVE_MIS;
+    }
   }
 
   f32[0] = Number(baseColor[0]);

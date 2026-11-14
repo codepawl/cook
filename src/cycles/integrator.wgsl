@@ -1273,12 +1273,22 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       camera_visible_environment = camera_visible_environment && is_transmission && !is_diffuse_transmission && is_singular;
       is_camera_ray = false;
       is_transparent_bg_ray = false;
-      mis_skip = is_singular;
-      prev_bsdf_pdf = bsdf_sample.pdf;
       min_ray_pdf = min(bsdf_sample.pdf, min_ray_pdf);
-      prev_recv_lo = point.light_group_mask_lo;
-      prev_recv_hi = point.light_group_mask_hi;
-      lgt_remember_mis_origin(point.position, point.shading_normal, closure_has_transmission, picks_through_tree);
+      // A shadow ray crosses a smooth thin pane (int_thin_glass_shadow_transmittance), so the surface behind it already
+      // takes a light sample through the pane. The ray that crosses the pane by its BSDF keeps the MIS state of that surface
+      // and does not start a new one, as Cycles does for its transparent closure; resetting it would count a light twice.
+      let crosses_smooth_thin_pane = SCENE_HAS_GLASS
+        && (material.flags & MATERIAL_FLAG_THIN_WALLED) != 0u
+        && is_singular
+        && bsdf_sample.sampled_lobe_type == LOBE_GLOSSY_GGX
+        && cos_ng_wi < 0.0;
+      if (!crosses_smooth_thin_pane) {
+        mis_skip = is_singular;
+        prev_bsdf_pdf = bsdf_sample.pdf;
+        prev_recv_lo = point.light_group_mask_lo;
+        prev_recv_hi = point.light_group_mask_hi;
+        lgt_remember_mis_origin(point.position, point.shading_normal, closure_has_transmission, picks_through_tree);
+      }
       path_active = true;
     }
 
