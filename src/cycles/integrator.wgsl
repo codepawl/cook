@@ -61,6 +61,8 @@ fn int_medium_stack_remove(
   *depth -= 1u;
 }
 const INT_ADAPTIVE_BATCH_SIZE: u32 = 8u;
+// The legacy kernel and the CPU tracer use a floor of 0.05 (CONVERGENCE_LUMINANCE_FLOOR); this kernel keeps 1e-3, so the same
+// noiseThreshold holds dark pixels to a tighter standard error here.
 const INT_ADAPTIVE_LUMINANCE_FLOOR: f32 = 1.0e-3;
 
 struct IntSurfaceHit {

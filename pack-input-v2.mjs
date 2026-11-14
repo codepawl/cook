@@ -147,7 +147,7 @@ export function resolveHdriRadianceLimit(hdriRadianceLimit, callerName) {
   }
   return hdriRadianceLimit;
 }
-const SUN_DEFAULT_HALF_ANGLE = Math.PI / 360;
+export const SUN_DEFAULT_HALF_ANGLE = Math.PI / 360;
 // Below this the f32 cosine of the half angle rounds to exactly 1.0 (about 2.44e-4 rad), the kernel can no
 // longer tell a cone from a delta light and the radiance color / (pi sin^2) overcounts by about 1 / solid angle.
 // It is also the smallest radius Crucible accepts.

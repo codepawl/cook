@@ -49,7 +49,16 @@ struct Params {
 @group(0) @binding(8) var<storage, read_write> accumulation: array<vec4<f32>>;
 @group(0) @binding(9) var<storage, read> primitiveSlots: array<u32>;
 
+// The stream state is two 32-bit words, each seeded from the whole (pixel, sample, seed) tuple by a different hash and stepped
+// by its own generator. Two streams share a path only when both words match, so distinct tuples practically never coincide.
 var<private> rngState: u32 = 1u;
+var<private> rngStateSecond: u32 = 1u;
+
+fn permuteRandomState(state: u32) -> u32 {
+  var word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+  word = (word >> 22u) ^ word;
+  return word;
+}
 
 fn resetRandom(pixel: u32, sampleIndex: u32, seed: u32) {
   var mixed = ((pixel + 0x9e3779b9u) * 0x85ebca6bu) ^ ((sampleIndex + 0x7f4a7c15u) * 0xc2b2ae35u) ^ ((seed + 0x165667b1u) * 0x27d4eb2fu);
@@ -57,12 +66,17 @@ fn resetRandom(pixel: u32, sampleIndex: u32, seed: u32) {
   mixed = (mixed ^ (mixed >> 12u)) * 0x297a2d39u;
   mixed ^= mixed >> 15u;
   rngState = select(mixed, 1u, mixed == 0u);
+  // The second word absorbs the three inputs one after another, so it is not a function of the first word's mix.
+  var chained = permuteRandomState(pixel ^ 0x68e31da4u);
+  chained = permuteRandomState(chained + sampleIndex * 0xb5297a4du);
+  chained = permuteRandomState(chained ^ (seed * 0x1b56c4e9u + 0x3c6ef372u));
+  rngStateSecond = chained;
 }
 
 fn nextRandom() -> f32 {
   rngState = rngState * 747796405u + 2891336453u;
-  var word = ((rngState >> ((rngState >> 28u) + 4u)) ^ rngState) * 277803737u;
-  word = (word >> 22u) ^ word;
+  rngStateSecond = rngStateSecond * 1664525u + 1013904223u;
+  let word = permuteRandomState(rngState) ^ permuteRandomState(rngStateSecond);
   return f32(word >> 8u) / 16777216.0;
 }
 
@@ -143,6 +157,8 @@ fn traceRay(origin: vec3<f32>, direction: vec3<f32>, limit: f32, anyHit: bool, c
 var<private> hitDistance: f32;
 var<private> hitPoint: vec3<f32>;
 var<private> hitNormal: vec3<f32>;
+// The unit normal of the triangle's plane, which the bounce origin is offset along. `hitNormal` is interpolated and may be mapped.
+var<private> hitGeometricNormal: vec3<f32>;
 var<private> hitColor: vec3<f32>;
 var<private> hitEmission: vec3<f32>;
 var<private> hitMetallic: f32;
@@ -239,6 +255,9 @@ fn fillHit(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> f32 {
   let normal = firstWeight * normalOneData.xyz + secondWeight * normalTwoData.xyz + thirdWeight * normalThreeData.xyz;
   let normalLength = length(normal);
   hitNormal = normal / select(normalLength, 1.0, normalLength == 0.0);
+  let planeNormal = cross(edgeOne, edgeTwo);
+  let planeNormalLength = length(planeNormal);
+  hitGeometricNormal = select(hitNormal, planeNormal / planeNormalLength, planeNormalLength > 0.0);
   let vertexColor = firstWeight * colorOneData.xyz + secondWeight * colorTwoData.xyz + thirdWeight * colorThreeData.xyz;
   let uv = firstWeight * vec2<f32>(normalOneData.w, colorOneData.w) + secondWeight * vec2<f32>(normalTwoData.w, colorTwoData.w) + thirdWeight * vec2<f32>(normalThreeData.w, colorThreeData.w);
   hitMaterialIndex = i32(cornerData.w);
@@ -973,6 +992,7 @@ fn enterSubsurface(depth: i32, entryNormal: vec3<f32>) -> bool {
   let color = select(colorBlock.rgb, hitColor, colorBlock.x < 0.0);
   let material = hitMaterialIndex;
   let entryPoint = hitPoint;
+  let entryGeometricNormal = hitGeometricNormal;
   let entryMask = hitMask;
   let entryScale = surfaceDiffuseShare * block.x / surfaceSubsurfaceChance;
   walkWeight = vec3<f32>(1.0);
@@ -985,6 +1005,7 @@ fn enterSubsurface(depth: i32, entryNormal: vec3<f32>) -> bool {
   } else {
     // A card: half of the colour is reflected on the side the ray came from and half is transmitted diffusely through it.
     hitPoint = entryPoint;
+    hitGeometricNormal = entryGeometricNormal;
     hitMask = entryMask;
     if (nextRandom() < 0.5) { subsurfaceNormal = -entryNormal; }
     throughput *= color * entryScale;
@@ -1100,13 +1121,17 @@ fn tracePath(origin: vec3<f32>, startDirection: vec3<f32>, pixel: u32, sampleInd
         afterMirror = false;
       }
     }
-    position = hitPoint + direction * surfaceOffset;
+    // Step off the surface along its plane normal, on the side the new direction leaves to. Along the direction itself the step
+    // shrinks with the cosine and rounds back onto the surface for a grazing bounce.
+    let leavesFront = dot(direction, hitGeometricNormal) >= 0.0;
+    position = hitPoint + hitGeometricNormal * select(-surfaceOffset, surfaceOffset, leavesFront);
     if (!survivesRoulette(depth)) { break; }
   }
 }
 
-// The same stop rule as the CPU tracer: after 16 samples, and then every 8, a pixel whose standard error of the mean luminance is
+// The same stop rule as the CPU tracer (and its floor of 0.05, CONVERGENCE_LUMINANCE_FLOOR in path-tracer.js): after 16 samples, and then every 8, a pixel whose standard error of the mean luminance is
 // under the threshold times the mean plus a small floor draws no more samples. It reads only the pixel's own sums.
+// The "cycles" kernel uses a floor of 1e-3 (INT_ADAPTIVE_LUMINANCE_FLOOR), so one noiseThreshold stops dark pixels sooner here.
 fn pixelHasConverged(statistics: vec4<f32>, threshold: f32) -> bool {
   let taken = u32(statistics.w);
   if (taken < ADAPTIVE_MINIMUM_SAMPLES || (taken - ADAPTIVE_MINIMUM_SAMPLES) % ADAPTIVE_BATCH_SAMPLES != 0u) { return false; }
