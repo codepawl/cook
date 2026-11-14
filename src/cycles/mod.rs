@@ -150,6 +150,11 @@ fn base_layer_lobe_bound(inputs: &BaseLayerInputs) -> u32 {
 /// thin-glass lobes, specular, diffuse and diffuse transmission. The scratch array of `closure_build` has this many slots.
 const MAX_CLOSURE_CANDIDATE_LOBES: u32 = 9;
 
+/// The `MAX_CLOSURE_LOBES` of the unspecialized kernel (abi.wgsl). A scene that needs fewer lobes shrinks it; a scene
+/// whose materials can add more candidates raises it up to `MAX_CLOSURE_CANDIDATE_LOBES`, so the closure keeps every lobe
+/// like Cycles does instead of dropping the weakest ones (issue #8, item 6b).
+const DEFAULT_CLOSURE_LOBES: u32 = 4;
+
 fn clamp_candidate_lobes(candidate_lobes: u32) -> u32 {
     candidate_lobes.clamp(1, MAX_CLOSURE_CANDIDATE_LOBES)
 }
@@ -327,7 +332,7 @@ pub(crate) fn scan_scene_specialization(input: &NativeTraceInputV2) -> SceneSpec
     // transmission (FORMAT-v2.md, "Material extension records"); each material then adds at most one lobe for the far side.
     let has_diffuse_transmission = mat_count > 0 && mats.len() >= 2 * mat_count * MATERIAL_RECORD_STRIDE;
     let diffuse_transmission_lobe = u32::from(has_diffuse_transmission);
-    let mut max_closure_lobes: u32 = if mat_count > 0 { 1 } else { 4 };
+    let mut max_closure_lobes: u32 = if mat_count > 0 { 1 } else { DEFAULT_CLOSURE_LOBES };
     let mut max_closure_candidates: u32 = if mat_count > 0 { 1 } else { MAX_CLOSURE_CANDIDATE_LOBES };
 
     for m in 0..mat_count {
@@ -403,7 +408,8 @@ pub(crate) fn scan_scene_specialization(input: &NativeTraceInputV2) -> SceneSpec
         });
         let candidate_lobes = trans_lobe + sheen_lobe + coat_lobe + base_lobes + diffuse_transmission_lobe;
         max_closure_candidates = max_closure_candidates.max(clamp_candidate_lobes(candidate_lobes));
-        max_closure_lobes = max_closure_lobes.max(candidate_lobes.clamp(1, 4));
+        // The closure holds every candidate the scene can produce, so no lobe is pruned and no energy is lost.
+        max_closure_lobes = max_closure_lobes.max(clamp_candidate_lobes(candidate_lobes));
     }
 
     // --- Per-light flags ---
@@ -551,7 +557,7 @@ pub(crate) fn specialize_kernel_source(source: &str, scene: &SceneSpecialization
     specialize!(ENV_IMPORTANCE, has_env_importance);
     specialize!(LIGHT_LINKING, has_light_linking);
     specialize!(LIGHT_TREE, has_light_tree);
-    if max_closure_lobes < 4 {
+    if max_closure_lobes != DEFAULT_CLOSURE_LOBES {
         result = result.replace(
             "const MAX_CLOSURE_LOBES: u32 = 4u; // SPECIALIZE_LOBES",
             &format!("const MAX_CLOSURE_LOBES: u32 = {max_closure_lobes}u; // SPECIALIZE_LOBES"),
@@ -1055,6 +1061,48 @@ fn ").unwrap_or(sample_body.len());
         assert!(kernel.contains(&format!(
             "const MAX_CLOSURE_CANDIDATES: u32 = {MAX_CLOSURE_CANDIDATE_LOBES}u; // SPECIALIZE_CANDIDATES"
         )));
+    }
+
+    #[test]
+    fn the_kernel_default_lobe_count_matches_the_host_default() {
+        let kernel = assemble_cycles_kernel().expect("the kernel assembles");
+        assert!(kernel.contains(&format!("const MAX_CLOSURE_LOBES: u32 = {DEFAULT_CLOSURE_LOBES}u; // SPECIALIZE_LOBES")));
+    }
+
+    #[test]
+    fn a_scene_with_more_candidates_than_the_default_keeps_every_lobe_instead_of_pruning() {
+        let kernel_params = make_kp(0, 0.0, 0, 0, 0.0);
+        let source = "const MAX_CLOSURE_LOBES: u32 = 4u; // SPECIALIZE_LOBES\n\
+                      const MAX_CLOSURE_CANDIDATES: u32 = 9u; // SPECIALIZE_CANDIDATES";
+        let instance = make_default_inst();
+        let light = make_default_light();
+
+        let eight_candidates = dummy_input(&kernel_params, &layered_thin_walled_material(), &light, &instance);
+        let scene = scan_scene_specialization(&eight_candidates);
+        assert_eq!(scene.max_closure_candidates, 8);
+        assert_eq!(scene.max_closure_lobes, 8, "the closure holds all eight lobes, so nothing is dropped");
+        let specialized = specialize_cycles_kernel(source, &eight_candidates);
+        assert!(specialized.contains("const MAX_CLOSURE_LOBES: u32 = 8u; // SPECIALIZE_LOBES"));
+        assert!(specialized.contains("const MAX_CLOSURE_CANDIDATES: u32 = 8u; // SPECIALIZE_CANDIDATES"));
+
+        let mut extension_table = layered_thin_walled_material();
+        extension_table.extend_from_slice(&vec![0u8; MATERIAL_RECORD_STRIDE]);
+        let mut nine_candidates = dummy_input(&kernel_params, &extension_table, &light, &instance);
+        nine_candidates.material_count = 1;
+        let specialized = specialize_cycles_kernel(source, &nine_candidates);
+        assert!(specialized.contains("const MAX_CLOSURE_LOBES: u32 = 9u; // SPECIALIZE_LOBES"));
+    }
+
+    #[test]
+    fn a_scene_with_four_or_fewer_candidates_keeps_the_kernel_source_byte_identical_to_before() {
+        let kernel_params = make_kp(0, 0.0, 0, 0, 0.0);
+        let instance = make_default_inst();
+        let light = make_default_light();
+        let plain_material = make_mat(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, -1, -1);
+        let input = dummy_input(&kernel_params, &plain_material, &light, &instance);
+        let scene = scan_scene_specialization(&input);
+        assert!(scene.max_closure_lobes <= DEFAULT_CLOSURE_LOBES);
+        assert_eq!(scene.max_closure_lobes, scene.max_closure_candidates, "no pruning is needed below the default");
     }
 
     #[test]

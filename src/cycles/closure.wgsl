@@ -873,6 +873,8 @@ fn closure_build(point: ptr<function, ShadingPoint>, wo: vec3<f32>) -> Closure {
     }
   }
 
+  // Only the unspecialized kernel prunes: the host raises MAX_CLOSURE_LOBES to the candidate bound of the scene, so a
+  // specialized pipeline keeps every lobe. This branch drops the weakest lobes without renormalising and is biased dark.
   if (CLOSURE_PRUNES_CANDIDATES) {
     let cand_count = closure.lobe_count;
     closure.lobe_count = 0u;
