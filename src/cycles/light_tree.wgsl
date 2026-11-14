@@ -11,8 +11,6 @@
 // Emitters are addressed by their unified index: analytic lights first, then emissive triangles after `light_count`.
 
 const LTR_EMITTER_KIND_TRIANGLE: u32 = 1u;
-// The environment as an emitter of the distant leaf; it has no light record. See `ltr_holds_environment`.
-const LTR_EMITTER_KIND_BACKGROUND: u32 = 4u;
 const LTR_NODE_KIND_DISTANT: u32 = 131072u;
 const LTR_NODE_EMITTER_COUNT_MASK: u32 = 65535u;
 const LTR_MAX_TREE_DEPTH: u32 = 64u;
@@ -315,45 +313,10 @@ fn ltr_sun_light_profile(light: LightRecord, emitter: LightTreeEmitter) -> LtrPr
   return profile;
 }
 
-// True when the packer put the environment in the tree: the flag is set, `light_to_tree` has one entry past the analytic
-// lights and the emissive triangles (unified index `light_count + emissive_triangle_count`) and it names an emitter of the
-// background kind. Asking the tables as well as the flag keeps a frame whose flag and tree disagree from reading a slot
-// that is not there.
-fn ltr_holds_environment() -> bool {
-  if ((kernel_params.kernel_flags & KERNEL_FLAG_ENVIRONMENT_IN_LIGHT_TREE) == 0u) {
-    return false;
-  }
-  let background_index = kernel_params.light_count + kernel_params.emissive_triangle_count;
-  if (background_index >= arrayLength(&light_to_tree)) {
-    return false;
-  }
-  let slot = light_to_tree[background_index];
-  if (slot >= arrayLength(&light_tree_emitters)) {
-    return false;
-  }
-  return (light_tree_emitters[slot].kind_and_depth & LTR_EMITTER_KIND_BACKGROUND) != 0u;
-}
-
-// Cycles `background_light_tree_parameters`: the environment covers the whole sphere (cos_theta_u = -1) and emits toward every
-// direction (theta_o = pi), so its importance is its energy from any shading point and its minimum importance is 0.
-fn ltr_background_profile(emitter: LightTreeEmitter) -> LtrProfile {
-  var profile = ltr_invisible_profile();
-  profile.cone_axis = -profile.point_to_centroid;
-  profile.cos_theta_u = -1.0;
-  profile.theta_o = PI;
-  profile.theta_e = 0.0;
-  profile.energy = emitter.energy;
-  profile.visible = true;
-  return profile;
-}
-
 fn ltr_emitter_profile(emitter_slot: u32, position: vec3<f32>, normal: vec3<f32>, has_transmission: bool) -> LtrProfile {
   let emitter = light_tree_emitters[emitter_slot];
   if ((emitter.kind_and_depth & LTR_EMITTER_KIND_TRIANGLE) != 0u) {
     return ltr_triangle_profile(emitter, position, normal, has_transmission);
-  }
-  if ((emitter.kind_and_depth & LTR_EMITTER_KIND_BACKGROUND) != 0u) {
-    return ltr_background_profile(emitter);
   }
   let light = lights[emitter.record_index];
   if (light.light_type == LIGHT_TYPE_POINT || light.light_type == LIGHT_TYPE_SPOT) {
@@ -635,9 +598,7 @@ fn ltr_probe_pick_probabilities(pixel_index: u32) -> vec4<f32> {
   let normal = lgt_sample_uniform_sphere(vec2<f32>(ltr_probe_random(pixel_index, 3u), ltr_probe_random(pixel_index, 4u)));
   let has_transmission = (pixel_index & 1u) != 0u;
 
-  let has_background_emitter = ltr_holds_environment();
-  let background_index = kernel_params.light_count + kernel_params.emissive_triangle_count;
-  let emitter_total = background_index + select(0u, 1u, has_background_emitter);
+  let emitter_total = kernel_params.light_count + kernel_params.emissive_triangle_count;
   var probability_sum = 0.0;
   var reachable_emitters = 0.0;
   for (var unified_index = 0u; unified_index < emitter_total; unified_index += 1u) {
@@ -661,9 +622,6 @@ fn ltr_probe_pick_probabilities(pixel_index: u32) -> vec4<f32> {
       var unified_index = emitter.record_index;
       if ((emitter.kind_and_depth & LTR_EMITTER_KIND_TRIANGLE) != 0u) {
         unified_index += kernel_params.light_count;
-      }
-      if ((emitter.kind_and_depth & LTR_EMITTER_KIND_BACKGROUND) != 0u) {
-        unified_index = background_index;
       }
       largest_gap = max(largest_gap, abs(pick_probability - ltr_pdf(position, normal, has_transmission, unified_index)));
     }

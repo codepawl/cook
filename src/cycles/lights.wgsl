@@ -41,19 +41,6 @@ fn lgt_use_light_tree() -> bool {
   return SCENE_HAS_LIGHT_TREE && (kernel_params.kernel_flags & KERNEL_FLAG_USE_LIGHT_TREE) != 0u;
 }
 
-// True when the environment is an emitter of the light tree and the tree is in use: a surface bounce then reaches the
-// environment through the tree pick, as in Blender Cycles, and takes no environment sample of its own. Read once per
-// invocation by `lgt_find_environment_in_tree`.
-var<private> lgt_environment_in_tree_now: bool = false;
-
-fn lgt_find_environment_in_tree() {
-  lgt_environment_in_tree_now = lgt_use_light_tree() && ltr_holds_environment();
-}
-
-fn lgt_environment_in_tree() -> bool {
-  return lgt_environment_in_tree_now;
-}
-
 fn lgt_remember_mis_origin(position: vec3<f32>, normal: vec3<f32>, has_transmission: bool, picked_by_tree: bool) {
   lgt_mis_position = position;
   lgt_mis_normal = normal;
@@ -775,17 +762,13 @@ fn lgt_sample_emissive_triangle_at(point: ptr<function, ShadingPoint>, index: u3
   return out;
 }
 
-// Picks one emitter (analytic light, emissive triangle or, when the tree holds it, the environment)
-// through the light tree and samples a point on it. The environment draws its direction from the environment slot of
-// `step`, and only when it is the pick.
+// Picks one emitter (analytic light or emissive triangle) through the light tree and samples a point on it.
 fn lgt_sample_tree_emitter(
   point: ptr<function, ShadingPoint>,
   normal: vec3<f32>,
   has_transmission: bool,
   pick_u: f32,
   sample_uv: vec2<f32>,
-  rng: ptr<function, SmpState>,
-  step: u32,
 ) -> LgtDirectSample {
   var pick_probability = 0.0;
   let slot = ltr_sample((*point).position, normal, has_transmission, pick_u, &pick_probability);
@@ -793,17 +776,6 @@ fn lgt_sample_tree_emitter(
     return lgt_empty_sample();
   }
   let emitter = light_tree_emitters[u32(slot)];
-  if ((emitter.kind_and_depth & LTR_EMITTER_KIND_BACKGROUND) != 0u) {
-    // A tree that holds the environment under a frame that samples it apart: the pick is spent, and the environment's own
-    // sample carries its light in full.
-    if (!lgt_environment_in_tree()) {
-      return lgt_empty_sample();
-    }
-    smp_seek(rng, step, SMP_SLOT_ENVIRONMENT);
-    var environment_sample = lgt_sample_environment((*point).position, smp_next_4d(rng));
-    environment_sample.pdf *= pick_probability;
-    return environment_sample;
-  }
   if ((emitter.kind_and_depth & LTR_EMITTER_KIND_TRIANGLE) != 0u) {
     return lgt_sample_emissive_triangle_at(point, emitter.record_index, pick_probability, sample_uv);
   }
@@ -1222,12 +1194,7 @@ fn lgt_eval_escaped_ray(
     }
     var env_mis = 1.0;
     if (!is_camera_ray && !mis_skip && SCENE_HAS_ENV_IMPORTANCE && kernel_params.env_width > 0u && kernel_params.env_height > 0u && kernel_params.background_mis_weight > 0.0) {
-      var pdf_env = lgt_environment_pdf(lgt_mis_position, ray_dir);
-      if (lgt_environment_in_tree()) {
-        // The direct light sample reached the environment through the tree pick of the last shading point. After a volume
-        // scatter the environment had a sample of its own, and the probability below is 1.
-        pdf_env *= lgt_selection_probability(kernel_params.light_count + kernel_params.emissive_triangle_count, 1.0);
-      }
+      let pdf_env = lgt_environment_pdf(lgt_mis_position, ray_dir);
       env_mis = lgt_power_heuristic(prev_bsdf_pdf, pdf_env);
     }
     total += env_radiance * env_mis;

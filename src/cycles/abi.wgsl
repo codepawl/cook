@@ -53,11 +53,6 @@ const KERNEL_FLAG_PATH_REGENERATION: u32 = 1024u;
 // stores mip levels is read at the level the footprint asks for. Clear (default): every texture is read at level 0, as Blender
 // Cycles does.
 const KERNEL_FLAG_TEXTURE_MIPS: u32 = 2048u;
-// Set: the packer put the environment in the light tree as one more emitter (the last slot of the distant leaf, unified index
-// `light_count + emissive_triangle_count`), so a surface bounce draws one direct light sample for lights, emitters and
-// environment together, as Blender Cycles does. Clear (default): the environment keeps a direct light sample of its own at
-// every bounce. The kernel also checks that the tree holds that emitter, so a flag without it falls back to the default.
-const KERNEL_FLAG_ENVIRONMENT_IN_LIGHT_TREE: u32 = 4096u;
 
 // `KernelParamsV2.filter_type` values.
 const FILTER_BOX: u32 = 0u;

@@ -7,8 +7,6 @@
 const INT_MAX_PATH_STEPS: u32 = 128u;
 const INT_ADAPTIVE_BATCH_SIZE: u32 = 8u;
 const INT_ADAPTIVE_LUMINANCE_FLOOR: f32 = 1.0e-3;
-// Ray flag 4 of a ray query: accept the first hit found and stop, instead of searching for the nearest one.
-const INT_RAY_FLAG_TERMINATE_ON_FIRST_HIT: u32 = 4u;
 
 struct IntSurfaceHit {
   hit: u32,
@@ -249,21 +247,15 @@ fn int_trace_shadow(
     // max(transparent_max_bounce - transparent_bounce, 0) transparent hits: the transparent
     // surfaces the camera path already passed count against the same limit as the shadow ray's.
     var transparent_hits = path_transparent_bounces;
-    // The first trace stops at any hit instead of the nearest one. A ray that reaches the light finds none, and a ray that an
-    // opaque surface blocks is answered by whichever blocker comes up first, so both skip the search for the nearest hit.
-    // Only when that hit is one the walk below would step past (the surface the ray leaves, the emitter it aims at, a
-    // transparent sheet) does the ray start again and take its hits in order, as every shadow ray did before.
-    var ordered_walk = false;
-    for (var step = 0u; step <= INT_MAX_PATH_STEPS + 1u; step += 1u) {
+    for (var step = 0u; step <= INT_MAX_PATH_STEPS; step += 1u) {
       if (current_t_min >= shadow_t_max) {
         break;
       }
-      let ray_flags = select(INT_RAY_FLAG_TERMINATE_ON_FIRST_HIT, 0u, ordered_walk);
       var query: ray_query;
       rayQueryInitialize(
         &query,
         scene_tlas,
-        RayDesc(ray_flags, INSTANCE_VISIBILITY_SHADOW, current_t_min, shadow_t_max, ray_origin, ray_dir),
+        RayDesc(0u, INSTANCE_VISIBILITY_SHADOW, current_t_min, shadow_t_max, ray_origin, ray_dir),
       );
       while (rayQueryProceed(&query)) {
         let candidate = rayQueryGetCandidateIntersection(&query);
@@ -298,9 +290,13 @@ fn int_trace_shadow(
       let hit_inst = instances[hit_inst_idx];
       let hit_tri_idx = int_resolve_triangle_index(hit_inst, committed.geometry_index, committed.primitive_index);
 
-      let steps_past_hit = (hit_inst_idx == self_instance && hit_tri_idx == self_triangle && committed.t < 1.0e-3)
+      if ((hit_inst_idx == self_instance && hit_tri_idx == self_triangle && committed.t < 1.0e-3)
         || (hit_inst_idx == target_instance && hit_tri_idx == target_triangle)
-        || (hit_inst.visibility_flags & INSTANCE_VISIBILITY_SHADOW) == 0u;
+        || (hit_inst.visibility_flags & INSTANCE_VISIBILITY_SHADOW) == 0u) {
+        current_t_min = committed.t + step_eps;
+        continue;
+      }
+
       let hit_tri = triangles[hit_tri_idx];
       let hit_mat = materials[int_resolve_material_index(hit_inst, hit_tri)];
       // A cutout that passed its alpha test above is solid: its alpha reads 1 from there on, as it does for a ray that hits it
@@ -308,20 +304,6 @@ fn int_trace_shadow(
       // every texel of a map whose alpha is below 1, a quarter of it at an alpha of 0.75 (#1030).
       let supports_transparent_shadow = hit_mat.alpha_mode != ALPHA_MODE_MASK
         && (hit_mat.alpha_mode == ALPHA_MODE_BLEND || (hit_mat.flags & MATERIAL_FLAG_TRANSPARENT_SHADOW) != 0u);
-
-      if (!ordered_walk) {
-        if (!steps_past_hit && !supports_transparent_shadow) {
-          return vec3<f32>(0.0);
-        }
-        ordered_walk = true;
-        continue;
-      }
-
-      if (steps_past_hit) {
-        current_t_min = committed.t + step_eps;
-        continue;
-      }
-
       if (supports_transparent_shadow) {
         let opacity = int_evaluate_surface_opacity(hit_tri, hit_mat, committed.barycentrics);
         if (opacity < 1.0) {
@@ -739,7 +721,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     return;
   }
 
-  lgt_find_environment_in_tree();
   let limit_bounce = kernel_params.max_bounces + 1u;
   let limit_diffuse = kernel_params.max_diffuse_bounces + 1u;
   let limit_glossy = kernel_params.max_glossy_bounces + 1u;
@@ -1095,7 +1076,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           smp_seek(&rng, step, SMP_SLOT_ANALYTIC_PICK);
           let tree_pick_u = smp_next_1d(&rng);
           let tree_sample_uv = smp_next_2d(&rng);
-          direct_sample = lgt_sample_tree_emitter(&point, point.shading_normal, closure_has_transmission, tree_pick_u, tree_sample_uv, &rng, step);
+          direct_sample = lgt_sample_tree_emitter(&point, point.shading_normal, closure_has_transmission, tree_pick_u, tree_sample_uv);
         } else if (direct_source == 1u && picks_through_tree) {
           continue;
         } else if (direct_source == 0u) {
@@ -1115,10 +1096,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             direct_sample = lgt_sample_emissive_triangle(&point, smp_next_1d(&rng), smp_next_2d(&rng));
           }
         } else {
-          // With the environment in the light tree the pick above already stood for it.
-          if (picks_through_tree && lgt_environment_in_tree()) {
-            continue;
-          }
           if (SCENE_HAS_ENV_IMPORTANCE && kernel_params.env_width > 0u && kernel_params.env_height > 0u && kernel_params.background_mis_weight > 0.0) {
             smp_seek(&rng, step, SMP_SLOT_ENVIRONMENT);
             direct_sample = lgt_sample_environment(point.position, smp_next_4d(&rng));
