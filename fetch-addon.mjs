@@ -2,7 +2,7 @@
 // build/render-native.node, so a machine can render without Rust. The release workflow (.github/workflows/release.yml)
 // builds one addon per supported system and a `.sha256` file next to each; the download is refused when the hash differs.
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -46,10 +46,10 @@ export function verifySha256(bytes, expectedHash, assetName) {
   }
 }
 
-async function download(url) {
+export async function download(url, fetchImplementation = fetch) {
   let response;
   try {
-    response = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MILLISECONDS) });
+    response = await fetchImplementation(url, { redirect: 'follow', signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MILLISECONDS) });
   } catch (error) {
     throw new Error(`Could not download ${url}: ${error.message}. Check the network, or build from source with npm run build.`);
   }
@@ -59,7 +59,24 @@ async function download(url) {
   if (!response.ok) {
     throw new Error(`Downloading ${url} failed with HTTP ${response.status}. Try again later, or build from source with npm run build.`);
   }
-  return Buffer.from(await response.arrayBuffer());
+  try {
+    return Buffer.from(await response.arrayBuffer());
+  } catch (error) {
+    throw new Error(`Could not download ${url}: ${error.message}. Check the network, or build from source with npm run build.`);
+  }
+}
+
+/** Writes the bytes next to the target and renames them over it; removes the partial file and names the fix on failure. */
+export function writeAddonAtomically(partialPath, addonPath, addonBytes) {
+  try {
+    writeFileSync(partialPath, addonBytes);
+    renameSync(partialPath, addonPath);
+  } catch (error) {
+    rmSync(partialPath, { force: true });
+    throw new Error(
+      `Could not write ${addonPath}: ${error.message}. Close other cook processes using build/render-native.node, or make build/ writable.`
+    );
+  }
 }
 
 function packageVersion() {
@@ -90,7 +107,6 @@ export async function fetchPrebuiltAddon({ platform = process.platform, arch = p
   mkdirSync(buildDirectory, { recursive: true });
   const addonPath = join(buildDirectory, 'render-native.node');
   const partialPath = `${addonPath}.partial`;
-  writeFileSync(partialPath, addonBytes);
-  renameSync(partialPath, addonPath);
+  writeAddonAtomically(partialPath, addonPath, addonBytes);
   return addonPath;
 }

@@ -14,6 +14,7 @@ import {
   withTimeLimitCode,
 } from '../engine.mjs';
 import { PACK_REVISION, findNativeAddon, resolveNativeKernel, traceNative } from '../index.mjs';
+import { decodePackFile } from '../pack-file.mjs';
 import { validatePackOptions } from '../pack-input-v2.mjs';
 
 const PACKAGE_DIRECTORY = fileURLToPath(new URL('..', import.meta.url));
@@ -166,10 +167,10 @@ test('traceNative passes an addon time limit error on with its code', () => {
         },
       };
     `);
-    const input = { schemaVersion: 2, kernelParams: new Uint8Array(320) };
+    const input = decodePackFile(readFileSync(join(PACKAGE_DIRECTORY, 'fixtures', 'room.cookpack')));
     withEnvironment({ COOK_ADDON_PATH: fakeAddon }, () => {
       assert.throws(
-        () => traceNative(input, { kernel: 'cycles', width: 4, height: 4, samples: 8, maxSeconds: 1 }),
+        () => traceNative(input, { kernel: 'cycles', width: 160, height: 120, samples: 8, maxSeconds: 1 }),
         (error) => isTimeLimitError(error) && error.message === TIME_LIMIT_MESSAGE,
       );
     });
