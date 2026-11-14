@@ -34,6 +34,12 @@ export const KERNEL_PARAMS_V2_FILTER_WIDTH_BYTE_OFFSET = 80;
 export const VALID_SAMPLERS = Object.freeze(['sobol-burley', 'white']);
 /** `auto` picks the light tree when the scene has more than `LIGHT_TREE_AUTO_MIN_EMITTERS` emitters. */
 export const VALID_LIGHT_SAMPLING = Object.freeze(['auto', 'tree', 'uniform']);
+/**
+ * `separate` gives the environment a direct light sample of its own at every bounce, next to the one for lights and
+ * emitters. `tree` puts the environment in the light tree, so a bounce draws one sample for all of them, as Blender
+ * Cycles does: one shadow ray less per bounce, and more noise per sample in a scene the environment lights.
+ */
+export const VALID_ENVIRONMENT_SAMPLING = Object.freeze(['separate', 'tree']);
 /** A single emitter is picked with probability 1 either way, so the tree only pays off from two emitters on. */
 export const LIGHT_TREE_AUTO_MIN_EMITTERS = 1;
 
@@ -63,6 +69,8 @@ export const KERNEL_FLAG_WHITE_NOISE_SAMPLER = 64;
 export const KERNEL_FLAG_PATH_REGENERATION = 1024;
 /** Set when any texture of the pool stores mip levels; the kernel then carries a ray footprint (see FORMAT-v2.md). */
 export const KERNEL_FLAG_TEXTURE_MIPS = 2048;
+/** Set when the environment is an emitter of the light tree (`environmentSampling: "tree"`, see FORMAT-v2.md 7b). */
+export const KERNEL_FLAG_ENVIRONMENT_IN_LIGHT_TREE = 4096;
 
 /** `flags` of a material extension record: the diffuse transmission colour multiplies the base colour. */
 const MATERIAL_EXTENSION_FLAG_TINTS_BASE_COLOR = 1;
@@ -1608,12 +1616,13 @@ function packAnalyticLightsBuffer(allEntries) {
 
 // Builds the Cycles light tree over the packed lights and emissive triangles (light-tree-v2.mjs) and records the
 // owning leaf of every analytic light in its `tree_leaf_index` field.
-function packLightTree(packedLights, packedEmissives) {
+function packLightTree(packedLights, packedEmissives, backgroundEnergy = 0) {
   const tree = buildLightTree(
     packedLights.lights,
     packedLights.lightCount,
     packedEmissives.emissiveTriangles,
-    packedEmissives.emissiveTriangleCount
+    packedEmissives.emissiveTriangleCount,
+    { backgroundEnergy }
   );
   const lightWords = new Uint32Array(packedLights.lights.buffer, packedLights.lights.byteOffset, packedLights.lights.byteLength / 4);
   const wordsPerLight = STRUCT_STRIDES_V2.light / 4;
@@ -1626,6 +1635,7 @@ function packLightTree(packedLights, packedEmissives) {
     lightTreeEmitters: tree.emitters,
     lightTreeEmitterCount: tree.emitterCount,
     lightToTree: tree.lightToTree,
+    environmentInLightTree: tree.hasBackground,
   };
 }
 
@@ -1723,6 +1733,7 @@ function packEnvironmentTexelsV2(environment, options = {}) {
       envRotation: 0,
       envColor: [Number(bg[0]), Number(bg[1]), Number(bg[2])],
       envTotalWeight: 0,
+      averageRadiance: 0,
       cameraEnvScale: 0,
     };
   }
@@ -1745,6 +1756,9 @@ function packEnvironmentTexelsV2(environment, options = {}) {
   const pixelWeights = new Float64Array(pixelCount);
   const deltaPhi = (2 * Math.PI) / width;
   const deltaTheta = Math.PI / height;
+  const envColor = options.envColor ?? [intensity, intensity, intensity];
+  const colorScale = [Math.abs(Number(envColor[0])), Math.abs(Number(envColor[1])), Math.abs(Number(envColor[2]))];
+  let radianceTimesSineSum = 0;
   let totalWeight = 0;
 
   for (let y = 0; y < height; y++) {
@@ -1765,6 +1779,7 @@ function packEnvironmentTexelsV2(environment, options = {}) {
       const weight = (0.2126 * r + 0.7152 * g + 0.0722 * b) * intensity * sinTheta * deltaPhi * deltaTheta;
       pixelWeights[pixelIndex] = weight;
       rowSum += weight;
+      radianceTimesSineSum += ((r * colorScale[0] + g * colorScale[1] + b * colorScale[2]) / 3) * sinTheta;
     }
     rowTotals[y] = rowSum;
     totalWeight += rowSum;
@@ -1799,7 +1814,6 @@ function packEnvironmentTexelsV2(environment, options = {}) {
     }
   }
 
-  const envColor = options.envColor ?? [intensity, intensity, intensity];
   return {
     environmentTexels: texels,
     envWidth: width,
@@ -1808,6 +1822,9 @@ function packEnvironmentTexelsV2(environment, options = {}) {
     envRotation,
     envColor: [Number(envColor[0]), Number(envColor[1]), Number(envColor[2])],
     envTotalWeight: totalWeight,
+    // The mean radiance over the sphere, as Cycles keeps it for its background light: the mean over the image of
+    // mean(|rgb|) * sin(theta), times pi / 2.
+    averageRadiance: (radianceTimesSineSum / pixelCount) * (Math.PI / 2),
     cameraEnvScale: resolveCameraEnvScale(environment.cameraIntensity, intensity),
   };
 }
@@ -1971,6 +1988,39 @@ export function validatePathRegenerationOption(pathRegeneration, callerName) {
       `${callerName}: \`pathRegeneration\` must be true, false or left out (the "cycles" kernel defaults to true), got ${JSON.stringify(pathRegeneration)}.`
     );
   }
+}
+
+/**
+ * Reads `environmentSampling` ("separate" when left out) and refuses a value that is unknown or that cannot work with
+ * `lightSampling: "uniform"`, which has no tree to put the environment in.
+ */
+export function resolveEnvironmentSampling(options, callerName) {
+  const environmentSampling = options.environmentSampling ?? 'separate';
+  if (!VALID_ENVIRONMENT_SAMPLING.includes(environmentSampling)) {
+    throw new RangeError(
+      `${callerName}: \`environmentSampling\` must be "separate" (default) or "tree", got ${JSON.stringify(options.environmentSampling)}.`
+    );
+  }
+  if (environmentSampling === 'tree' && resolveSamplingOptions(options, callerName).lightSampling === 'uniform') {
+    throw new RangeError(
+      `${callerName}: \`environmentSampling: "tree"\` puts the environment in the light tree, which \`lightSampling: "uniform"\` switches off. Pass \`lightSampling: "tree"\` or "auto", or \`environmentSampling: "separate"\`.`
+    );
+  }
+  return environmentSampling;
+}
+
+/**
+ * The energy the environment has as an emitter of the light tree, or 0 when it stays out of it: its average radiance
+ * times pi, the irradiance it gives a surface under a cosine hemisphere (Cycles `LightTreeEmitter`, `LIGHT_BACKGROUND`).
+ */
+function environmentLightTreeEnergy(packedEnvironment, options, callerName) {
+  if (resolveEnvironmentSampling(options, callerName) !== 'tree') {
+    return 0;
+  }
+  if (!(packedEnvironment.envWidth > 0 && packedEnvironment.envTotalWeight > 0)) {
+    return 0;
+  }
+  return packedEnvironment.averageRadiance * Math.PI;
 }
 
 /** True when the kernel should pick lights through the light tree for this scene and mode. */
@@ -2346,8 +2396,12 @@ function packKernelParamsV2({
     kernelFlags |= KERNEL_FLAG_LIGHT_TREE_PROBE;
   }
   const emitterCount = counts.lightCount + counts.emissiveTriangleCount;
-  if (resolveUseLightTree(lightSampling, emitterCount, counts.lightTreeNodeCount)) {
+  // With the environment in the tree it is one more emitter, so the tree is walked from the first light on.
+  if (counts.environmentInLightTree === true || resolveUseLightTree(lightSampling, emitterCount, counts.lightTreeNodeCount)) {
     kernelFlags |= KERNEL_FLAG_USE_LIGHT_TREE;
+  }
+  if (counts.environmentInLightTree === true) {
+    kernelFlags |= KERNEL_FLAG_ENVIRONMENT_IN_LIGHT_TREE;
   }
   if (volumeDensity > 0) {
     kernelFlags |= KERNEL_FLAG_HAS_VOLUME;
@@ -2995,8 +3049,8 @@ export function buildNativeInputV2(scene, camera, options = {}) {
   const packedEmissives = packEmissiveTriangleBuffer(packedGeometry.emissiveList);
   const analyticEntries = buildAnalyticLightEntries(scene.lights);
   const packedLights = packAnalyticLightsBuffer(analyticEntries);
-  const packedLightTree = packLightTree(packedLights, packedEmissives);
   const packedEnvironment = packEnvironmentTexelsV2(scene.environment, options);
+  const packedLightTree = packLightTree(packedLights, packedEmissives, environmentLightTreeEnergy(packedEnvironment, options, 'buildNativeInputV2'));
 
   const counts = {
     instanceCount: packedGeometry.instanceCount,
@@ -3006,6 +3060,7 @@ export function buildNativeInputV2(scene, camera, options = {}) {
     lightCount: packedLights.lightCount,
     portalCount: packedLights.portalCount,
     lightTreeNodeCount: packedLightTree.lightTreeNodeCount,
+    environmentInLightTree: packedLightTree.environmentInLightTree,
     textureCount: packedTextures.textureCount,
     usesTextureMips: packedTextures.usesTextureMips,
   };
@@ -3486,8 +3541,8 @@ export function upgradeNativeInputV1ToV2(v1Input, options = {}, carriedFields = 
   const packedEmissives = packEmissiveTriangleBuffer(emissiveList);
   const analyticEntries = buildAnalyticLightEntries(reconstructedLights);
   const packedLights = packAnalyticLightsBuffer(analyticEntries);
-  const packedLightTree = packLightTree(packedLights, packedEmissives);
   const packedEnvironment = packEnvironmentTexelsV2(reconstructedEnv, options);
+  const packedLightTree = packLightTree(packedLights, packedEmissives, environmentLightTreeEnergy(packedEnvironment, options, 'buildNativeInputV2'));
 
   const mergedOptions = {
     width: options.width ?? paramI32[36],
@@ -3506,6 +3561,7 @@ export function upgradeNativeInputV1ToV2(v1Input, options = {}, carriedFields = 
     lightCount: packedLights.lightCount,
     portalCount: packedLights.portalCount,
     lightTreeNodeCount: packedLightTree.lightTreeNodeCount,
+    environmentInLightTree: packedLightTree.environmentInLightTree,
     textureCount: packedTextures.textureCount,
     usesTextureMips: packedTextures.usesTextureMips,
   };

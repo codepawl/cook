@@ -24,9 +24,10 @@ export const LIGHT_TREE_NODE_HAS_TRIANGLE = 1 << 16;
 export const LIGHT_TREE_NODE_DISTANT = 1 << 17;
 export const LIGHT_TREE_NODE_HAS_LIGHT = 1 << 18;
 
-// Emitter `kind_and_depth` bits: bit 0 triangle, bit 1 distant, bits 8..15 depth.
+// Emitter `kind_and_depth` bits: bit 0 triangle, bit 1 distant, bit 2 the environment, bits 8..15 depth.
 export const LIGHT_TREE_EMITTER_TRIANGLE = 1;
 export const LIGHT_TREE_EMITTER_DISTANT = 2;
+export const LIGHT_TREE_EMITTER_BACKGROUND = 4;
 export const LIGHT_TREE_EMITTER_DEPTH_SHIFT = 8;
 
 const LIGHT_BYTES = 128;
@@ -301,6 +302,24 @@ function triangleEmitter(view, index, unifiedIndex) {
   const axis = inPlane[0] === 0 && inPlane[1] === 0 && inPlane[2] === 0 ? [1, 0, 0] : inPlane;
   emitter.cone = { axis, thetaO: HALF_PI, thetaE: HALF_PI };
   return emitter;
+}
+
+// The environment as an emitter, as Cycles `LightTreeEmitter` builds it for `LIGHT_BACKGROUND`: a distant emitter that
+// emits toward every direction (theta_o = pi, theta_e = 0) around an arbitrary axis. It has no light record.
+function backgroundEmitter(energy, unifiedIndex) {
+  return {
+    unifiedIndex,
+    isTriangle: false,
+    isBackground: true,
+    recordIndex: 0,
+    isDistant: true,
+    maskLow: 0xffffffff,
+    boxMin: [0, 0, 0],
+    boxMax: [0, 0, 0],
+    centroid: [0, 0, 0],
+    cone: { axis: [0, 0, 1], thetaO: Math.PI, thetaE: 0 },
+    energy,
+  };
 }
 
 function emitterMeasure(emitter) {
@@ -620,6 +639,7 @@ function serializeEmitters(order) {
     words[3] =
       ((emitter.isTriangle ? LIGHT_TREE_EMITTER_TRIANGLE : 0) |
         (emitter.isDistant ? LIGHT_TREE_EMITTER_DISTANT : 0) |
+        (emitter.isBackground ? LIGHT_TREE_EMITTER_BACKGROUND : 0) |
         (emitter.depth << LIGHT_TREE_EMITTER_DEPTH_SHIFT)) >>>
       0;
     words[4] = emitter.recordIndex;
@@ -652,11 +672,21 @@ function validateRecordTable(label, bytes, count, stride) {
  * @param {number} lightCount number of analytic lights
  * @param {Uint8Array} emissiveTriangles packed `EmissiveTriangleRecord` table (section 5)
  * @param {number} emissiveTriangleCount number of emissive triangles
+ * @param {{backgroundEnergy?: number}} [options] `backgroundEnergy` above 0 adds the environment to the distant leaf as
+ *   one more emitter, with unified index `lightCount + emissiveTriangleCount`. Pass the average radiance of the
+ *   environment times pi (Cycles `LightTreeEmitter` for a background light). Ignored when the scene has no other emitter.
  * @returns {{nodes: Uint8Array, nodeCount: number, emitters: Uint8Array, emitterCount: number,
- *   lightToTree: Uint32Array, lightLeafIndices: Uint32Array}} `lightToTree[i]` is the emitter slot of unified
- *   emitter `i` (analytic lights first, then emissive triangles); `lightLeafIndices[i]` the leaf node of light `i`.
+ *   lightToTree: Uint32Array, lightLeafIndices: Uint32Array, hasBackground: boolean}} `lightToTree[i]` is the emitter
+ *   slot of unified emitter `i` (analytic lights first, then emissive triangles, then the environment when it is in the
+ *   tree); `lightLeafIndices[i]` the leaf node of light `i`.
  */
-export function buildLightTree(lights, lightCount, emissiveTriangles, emissiveTriangleCount) {
+export function buildLightTree(lights, lightCount, emissiveTriangles, emissiveTriangleCount, options = {}) {
+  const backgroundEnergy = options.backgroundEnergy;
+  if (backgroundEnergy !== undefined && !(Number.isFinite(backgroundEnergy) && backgroundEnergy >= 0)) {
+    throw new Error(
+      `buildLightTree: backgroundEnergy must be a finite number of 0 or more, got ${backgroundEnergy}. Pass the average radiance of the environment times pi, or leave it out to keep the environment out of the tree.`
+    );
+  }
   assertCount('lights', lightCount);
   assertCount('emissiveTriangles', emissiveTriangleCount);
   const totalEmitters = lightCount + emissiveTriangleCount;
@@ -675,6 +705,7 @@ export function buildLightTree(lights, lightCount, emissiveTriangles, emissiveTr
       emitterCount: 0,
       lightToTree: new Uint32Array(1),
       lightLeafIndices: new Uint32Array(0),
+      hasBackground: false,
     };
   }
 
@@ -686,6 +717,10 @@ export function buildLightTree(lights, lightCount, emissiveTriangles, emissiveTr
   }
   for (let index = 0; index < emissiveTriangleCount; index++) {
     localEmitters.push(triangleEmitter(emissiveTriangles, index, lightCount + index));
+  }
+  const hasBackground = backgroundEnergy > 0;
+  if (hasBackground) {
+    distantEmitters.push(backgroundEmitter(backgroundEnergy, totalEmitters));
   }
 
   const state = { nodes: [], order: localEmitters.concat(distantEmitters) };
@@ -711,12 +746,12 @@ export function buildLightTree(lights, lightCount, emissiveTriangles, emissiveTr
     }
   }
 
-  const lightToTree = new Uint32Array(totalEmitters);
+  const lightToTree = new Uint32Array(totalEmitters + (hasBackground ? 1 : 0));
   const lightLeafIndices = new Uint32Array(lightCount).fill(NO_LEAF_INDEX);
   for (let slot = 0; slot < state.order.length; slot++) {
     const emitter = state.order[slot];
     lightToTree[emitter.unifiedIndex] = slot;
-    if (!emitter.isTriangle) {
+    if (!emitter.isTriangle && !emitter.isBackground) {
       lightLeafIndices[emitter.recordIndex] = emitter.leafIndex;
     }
   }
@@ -727,5 +762,6 @@ export function buildLightTree(lights, lightCount, emissiveTriangles, emissiveTr
     emitterCount: state.order.length,
     lightToTree,
     lightLeafIndices,
+    hasBackground,
   };
 }

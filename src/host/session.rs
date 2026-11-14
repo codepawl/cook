@@ -722,9 +722,17 @@ pub(crate) fn validate_light_tree_tables(input: &NativeTraceInputV2) -> Result<(
     };
     validate_record_buffer("lightTreeEmitters", emitters, emitter_count, LIGHT_TREE_EMITTER_BYTES)?;
     let unified_count = input.light_count as u64 + input.emissive_triangle_count as u64;
-    if emitter_count as u64 != unified_count {
+    // The environment may be one more emitter after the lights and the emissive triangles (FORMAT-v2.md, section 7b).
+    let holds_environment = emitter_count as u64 == unified_count + 1;
+    if emitter_count as u64 != unified_count && !holds_environment {
         return Err(failure(format!(
-            "lightTreeEmitterCount is {emitter_count} but the input has {unified_count} lights and emissive triangles. The tree must hold every emitter once."
+            "lightTreeEmitterCount is {emitter_count} but the input has {unified_count} lights and emissive triangles. The tree must hold every emitter once, and at most the environment as one more."
+        )));
+    }
+    if (light_to_tree.len() as u64) < (emitter_count as u64).max(1) {
+        return Err(failure(format!(
+            "lightToTree holds {} entries, fewer than the {emitter_count} emitters of the light tree.",
+            light_to_tree.len()
         )));
     }
     if (light_to_tree.len() as u64) < unified_count.max(1) {
