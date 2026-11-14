@@ -44,7 +44,7 @@ Total size: **336 bytes** (`21 × 16 B`), alignment: **16 bytes**.
 | `36` | `4` | `4` | `f32` | `adaptive_threshold` | Adaptive stop threshold (`0.0` = disabled) |
 | `40` | `4` | `4` | `f32` | `clamp_direct` | Effective direct radiance ceiling at bounce `0` (`0.0` or `>= 1e30` = unclamped; Cycles `sample_clamp_direct * 3.0`) |
 | `44` | `4` | `4` | `f32` | `clamp_indirect` | Effective indirect radiance ceiling at bounce `> 0` (`0.0` or `>= 1e30` = unclamped; Cycles `sample_clamp_indirect * 3.0`) |
-| `48` | `4` | `4` | `u32` | `max_bounces` | Maximum total path bounces |
+| `48` | `4` | `4` | `u32` | `max_bounces` | Maximum total path bounces (the packer accepts 0 to 1024). The kernel's loop-step limit is `max(128, max_bounces + max_transparent_bounces + 16)`, so a path is never cut short by a fixed step cap; with the defaults it stays 128 |
 | `52` | `4` | `4` | `u32` | `max_diffuse_bounces` | Maximum diffuse bounces |
 | `56` | `4` | `4` | `u32` | `max_glossy_bounces` | Maximum glossy specular bounces |
 | `60` | `4` | `4` | `u32` | `max_transmission_bounces` | Maximum refractive transmission bounces |
@@ -81,7 +81,7 @@ Total size: **336 bytes** (`21 × 16 B`), alignment: **16 bytes**.
 | `236` | `4` | `4` | `f32` | `volume_density` | Extinction density `sigma_t` (`0.0` = no world volume) |
 | `240` | `12` | `16` | `vec3<f32>` | `volume_bounds_max` | World AABB maximum of homogeneous fog volume |
 | `252` | `4` | `4` | `f32` | `volume_anisotropy` | Henyey-Greenstein phase `g` in `[-0.99, 0.99]` |
-| `256` | `12` | `16` | `vec3<f32>` | `volume_albedo` | Single-scatter RGB albedo of homogeneous fog |
+| `256` | `12` | `16` | `vec3<f32>` | `volume_albedo` | Single-scatter RGB albedo of homogeneous fog; the packer rejects a missing or non-finite component and clamps each to `[0, 1]` |
 | `268` | `4` | `4` | `f32` | `emissive_total_weight` | Sum of `EmissiveTriangleRecord.selection_weight` |
 | `272` | `4` | `4` | `f32` | `analytic_light_total_weight` | Sum of analytic light selection weights |
 | `276` | `4` | `4` | `f32` | `ray_epsilon` | Ray origin offset scale (default `1e-4`) |
@@ -195,7 +195,7 @@ Includes all Principled BSDF v2 fields needed for Cycles parity:
 - **Clearcoat with tint**: `coat_tint` (`vec3<f32>` at offset `64`), `coat_weight` (`f32` at offset `76`), `coat_roughness` (`f32` at offset `80`), `coat_ior` (`f32` at offset `84`).
 - **Thin-film iridescence**: `thin_film_thickness` (`f32` nm at offset `88`), `thin_film_ior` (`f32` at offset `92`).
 - **Microfiber sheen**: `sheen_tint` (`vec3<f32>` at offset `96`), `sheen_weight` (`f32` at offset `108`), `sheen_roughness` (`f32` at offset `176`).
-- **Beer-Lambert volume absorption**: `absorption_color` (`vec3<f32>` at offset `112`) and `absorption_distance` (`f32` metres at offset `124`; when `> 0`, `sigma_a = -ln(max(absorption_color, vec3(1e-6))) / absorption_distance`).
+- **Beer-Lambert volume absorption**: `absorption_color` (`vec3<f32>` at offset `112`) and `absorption_distance` (`f32` metres at offset `124`; when `> 0`, `sigma_a = -ln(max(absorption_color, vec3(1e-6))) / absorption_distance`). The "cycles" kernel keeps a medium stack of up to 4 nested transmissive objects per path: every non-thin-walled transmission that enters a front face pushes an entry keyed by the instance (sigma 0 for a clear object), leaving a back face removes the entry of that instance (not blindly the top), and the current medium is the top entry. When the stack is full a deeper entry is not tracked, so the path keeps the medium it had and that object's exit changes nothing. Light samples taken from a fog scatter point are attenuated by the current medium the same way surface light samples are.
 
 | Byte Offset | Size (B) | Alignment (B) | WGSL Type | Field | Description |
 | ---: | ---: | ---: | :--- | :--- | :--- |
