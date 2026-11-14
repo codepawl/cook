@@ -30,6 +30,8 @@ const SMP_SLOT_VOLUME_ANALYTIC_PICK: u32 = 9u;
 const SMP_SLOT_VOLUME_ANALYTIC_POINT: u32 = 10u;
 const SMP_SLOT_VOLUME_ENVIRONMENT: u32 = 11u;
 const SMP_SLOT_VOLUME_PHASE: u32 = 12u;
+// Picks the one direct sample that gets a shadow ray (KERNEL_FLAG_SHADOW_RAY_PICK). Slots 13 to 15 stay free.
+const SMP_SLOT_SHADOW_PICK: u32 = 13u;
 
 struct SmpState {
   pixel_x: u32,

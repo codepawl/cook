@@ -54,6 +54,8 @@ export const KERNEL_FLAG_LIGHT_TREE_PROBE = 128;
 const KERNEL_FLAG_TEST_NEE_ONLY = 256;
 const KERNEL_FLAG_TEST_BSDF_ONLY = 512;
 export const VALID_DIRECT_LIGHTING = Object.freeze(['both', 'nee-only', 'bsdf-only']);
+/** `shadowRayPick` values: "all" traces a shadow ray per light sample (default), "contribution" traces one per vertex (see `KERNEL_FLAG_SHADOW_RAY_PICK` in abi.wgsl). */
+export const VALID_SHADOW_RAY_PICK = Object.freeze(['all', 'contribution']);
 const KERNEL_FLAG_HAS_VOLUME = 2;
 const KERNEL_FLAG_HAS_SUBSURFACE = 4;
 const KERNEL_FLAG_ORTHOGRAPHIC_CAMERA = 8;
@@ -63,6 +65,7 @@ export const KERNEL_FLAG_WHITE_NOISE_SAMPLER = 64;
 export const KERNEL_FLAG_PATH_REGENERATION = 1024;
 /** Set when any texture of the pool stores mip levels; the kernel then carries a ray footprint (see FORMAT-v2.md). */
 export const KERNEL_FLAG_TEXTURE_MIPS = 2048;
+export const KERNEL_FLAG_SHADOW_RAY_PICK = 4096;
 
 /** `flags` of a material extension record: the diffuse transmission colour multiplies the base colour. */
 const MATERIAL_EXTENSION_FLAG_TINTS_BASE_COLOR = 1;
@@ -2033,6 +2036,15 @@ function requireFiniteNumberOption(value, name, callerName, isAccepted, expectat
   }
 }
 
+/** Throws unless `shadowRayPick` is undefined, "all" or "contribution". */
+export function validateShadowRayPickOption(shadowRayPick, callerName) {
+  if (shadowRayPick !== undefined && !VALID_SHADOW_RAY_PICK.includes(shadowRayPick)) {
+    throw new RangeError(
+      `${callerName}: \`shadowRayPick\` must be "all" (default, a shadow ray for each light sample) or "contribution" (one shadow ray per vertex), got ${JSON.stringify(shadowRayPick)}.`
+    );
+  }
+}
+
 export function validatePackOptions(options, callerName, requireDimensionsAndSamples = false) {
   if (!options || typeof options !== 'object') {
     throw new TypeError(`${callerName}: \`options\` must be an object.`);
@@ -2053,6 +2065,7 @@ export function validatePackOptions(options, callerName, requireDimensionsAndSam
   validateDispatchBudgetMs(options.dispatchBudgetMs, callerName);
   resolveSamplingOptions(options, callerName);
   resolveEnvCompensationFraction(options.envCompensation, callerName);
+  validateShadowRayPickOption(options.shadowRayPick, callerName);
   validateDenoiseOption(options.denoise, callerName);
   validateTextureMipsOption(options.textureMips, 'textureMips', callerName);
   validateFilterOptions(options, callerName);
@@ -2451,6 +2464,10 @@ function packKernelParamsV2({
   }
   if (counts.usesTextureMips === true) {
     kernelFlags |= KERNEL_FLAG_TEXTURE_MIPS;
+  }
+  validateShadowRayPickOption(options.shadowRayPick, 'packKernelParamsV2');
+  if (options.shadowRayPick === 'contribution') {
+    kernelFlags |= KERNEL_FLAG_SHADOW_RAY_PICK;
   }
 
   const maxBounces = Math.max(0, Math.round(Number(options.bounces ?? options.maxBounces ?? 8)));

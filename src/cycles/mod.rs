@@ -1582,6 +1582,32 @@ mod tests {
         assert!(kernel.contains("select(0u, 3u, rng.use_sobol_burley == 0u || int_closure_has_evaluable_lobe(&closure))"));
     }
 
+    /// One shadow ray per vertex: every direct sample is evaluated unshadowed, one is picked by the luminance of that value, and its
+    /// value is divided by the pick probability before the firefly clamp. With the flag clear each sample keeps its own ray.
+    #[test]
+    fn one_shadow_ray_is_picked_by_unshadowed_luminance_and_rescaled_before_the_clamp() {
+        let kernel = assemble_cycles_kernel().expect("the kernel assembles");
+        assert!(kernel.contains("const KERNEL_FLAG_SHADOW_RAY_PICK: u32 = 4096u;"));
+        assert!(kernel.contains("const SMP_SLOT_SHADOW_PICK: u32 = 13u;"));
+        assert!(kernel.contains("(kernel_params.kernel_flags & KERNEL_FLAG_SHADOW_RAY_PICK) != 0u"));
+
+        let pick_start = kernel.find("fn int_accumulate_picked_direct_sample(").expect("the picker exists");
+        let pick_end = pick_start + kernel[pick_start..].find("
+}").expect("the picker ends");
+        let pick_body = &kernel[pick_start..pick_end];
+        assert!(pick_body.contains("int_luminance((*unshadowed_values)[candidate_index])"));
+        assert!(pick_body.contains("pick_weights[picked_index] / total_weight"));
+        assert_eq!(pick_body.matches("int_direct_sample_visibility(").count(), 1, "one shadow ray");
+        let rescale = pick_body.find("/ pick_probability").expect("the value is divided by the pick probability");
+        let clamp = pick_body.find("int_clamp_contribution(rescaled * visibility").expect("the clamp acts on the rescaled value");
+        assert!(rescale < clamp);
+
+        let accumulate_start = kernel.find("fn int_accumulate_direct_sample(").expect("the per-sample path exists");
+        let accumulate_end = accumulate_start + kernel[accumulate_start..].find("
+}").expect("the function ends");
+        assert!(kernel[accumulate_start..accumulate_end].contains("int_direct_sample_visibility(sample, point, transparent_bounces)"));
+    }
+
     /// The mip levels sit after level 0 in one run of words (`texture_fetch_texel` stays the only reader of the pool).
     #[test]
     fn a_mip_level_is_found_by_walking_the_halving_chain_from_level_0() {

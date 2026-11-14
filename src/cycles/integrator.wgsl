@@ -691,6 +691,56 @@ fn int_closure_has_evaluable_lobe(closure: ptr<function, Closure>) -> bool {
   return false;
 }
 
+// The light a direct sample would carry to the vertex if nothing blocked it, with the MIS weight, the BSDF and the medium applied.
+// Zero when the sample is invalid or the BSDF gives it nothing.
+fn int_direct_sample_unshadowed(
+  sample: LgtDirectSample,
+  closure: ptr<function, Closure>,
+  wo: vec3<f32>,
+  throughput: vec3<f32>,
+  medium_sigma: vec3<f32>,
+  in_medium: bool,
+) -> vec3<f32> {
+  if (sample.valid == 0u || sample.pdf <= 0.0) {
+    return vec3<f32>(0.0);
+  }
+  let bsdf = closure_eval(closure, sample.wi, wo);
+  if (bsdf.value.x <= 0.0 && bsdf.value.y <= 0.0 && bsdf.value.z <= 0.0) {
+    return vec3<f32>(0.0);
+  }
+  let nee_only = (kernel_params.kernel_flags & KERNEL_FLAG_TEST_NEE_ONLY) != 0u;
+  let mis_weight = select(lgt_power_heuristic(sample.pdf, bsdf.pdf), 1.0, sample.is_delta != 0u || nee_only);
+  if (mis_weight <= 0.0) {
+    return vec3<f32>(0.0);
+  }
+  var unshadowed = throughput * bsdf.value * sample.radiance * (mis_weight / sample.pdf);
+  if (in_medium && sample.distance < 1.0e29) {
+    unshadowed *= exp(-medium_sigma * sample.distance);
+  }
+  return unshadowed;
+}
+
+fn int_direct_sample_visibility(
+  sample: LgtDirectSample,
+  point: ptr<function, ShadingPoint>,
+  transparent_bounces: u32,
+) -> vec3<f32> {
+  if (sample.cast_shadow == 0u) {
+    return vec3<f32>(1.0);
+  }
+  let shadow_origin = int_ray_offset_origin(point, sample.wi);
+  return int_trace_shadow(
+    shadow_origin,
+    sample.wi,
+    sample.distance,
+    (*point).instance_index,
+    (*point).triangle_index,
+    sample.target_instance,
+    sample.target_triangle,
+    transparent_bounces,
+  );
+}
+
 fn int_accumulate_direct_sample(
   sample: LgtDirectSample,
   closure: ptr<function, Closure>,
@@ -703,44 +753,60 @@ fn int_accumulate_direct_sample(
   transparent_bounces: u32,
   radiance: ptr<function, vec3<f32>>,
 ) {
-  if (sample.valid == 0u || sample.pdf <= 0.0) {
-    return;
-  }
-  let bsdf = closure_eval(closure, sample.wi, wo);
-  if (bsdf.value.x <= 0.0 && bsdf.value.y <= 0.0 && bsdf.value.z <= 0.0) {
-    return;
-  }
-  let nee_only = (kernel_params.kernel_flags & KERNEL_FLAG_TEST_NEE_ONLY) != 0u;
-  let mis_weight = select(lgt_power_heuristic(sample.pdf, bsdf.pdf), 1.0, sample.is_delta != 0u || nee_only);
-  if (mis_weight <= 0.0) {
-    return;
-  }
-  var unshadowed = throughput * bsdf.value * sample.radiance * (mis_weight / sample.pdf);
-  if (in_medium && sample.distance < 1.0e29) {
-    unshadowed *= exp(-medium_sigma * sample.distance);
-  }
+  let unshadowed = int_direct_sample_unshadowed(sample, closure, wo, throughput, medium_sigma, in_medium);
   if (unshadowed.x <= 0.0 && unshadowed.y <= 0.0 && unshadowed.z <= 0.0) {
     return;
   }
-
-  var visibility = vec3<f32>(1.0);
-  if (sample.cast_shadow != 0u) {
-    let shadow_origin = int_ray_offset_origin(point, sample.wi);
-    visibility = int_trace_shadow(
-      shadow_origin,
-      sample.wi,
-      sample.distance,
-      (*point).instance_index,
-      (*point).triangle_index,
-      sample.target_instance,
-      sample.target_triangle,
-      transparent_bounces,
-    );
-  }
+  let visibility = int_direct_sample_visibility(sample, point, transparent_bounces);
   if (visibility.x <= 0.0 && visibility.y <= 0.0 && visibility.z <= 0.0) {
     return;
   }
   *radiance += int_clamp_contribution(unshadowed * visibility, i32(bounce));
+}
+
+// KERNEL_FLAG_SHADOW_RAY_PICK: of the direct samples of one vertex, traces a shadow ray for one, picked in proportion to the
+// luminance of its unshadowed contribution, and divides by the probability of the pick. A sample with no contribution is never
+// picked and adds nothing either way, so the estimate has the same mean as tracing every sample. The clamp acts on the rescaled
+// value, as it acts on the final value of each sample when every sample is traced.
+fn int_accumulate_picked_direct_sample(
+  samples: ptr<function, array<LgtDirectSample, 3>>,
+  unshadowed_values: ptr<function, array<vec3<f32>, 3>>,
+  point: ptr<function, ShadingPoint>,
+  pick_random: f32,
+  bounce: u32,
+  transparent_bounces: u32,
+  radiance: ptr<function, vec3<f32>>,
+) {
+  var pick_weights = vec3<f32>(0.0);
+  for (var candidate_index = 0u; candidate_index < 3u; candidate_index += 1u) {
+    pick_weights[candidate_index] = max(int_luminance((*unshadowed_values)[candidate_index]), 0.0);
+  }
+  let total_weight = pick_weights.x + pick_weights.y + pick_weights.z;
+  if (!(total_weight > 0.0)) {
+    return;
+  }
+  let pick_target = clamp(pick_random, 0.0, 0.99999994) * total_weight;
+  var picked_index = 0u;
+  var weight_before = 0.0;
+  for (var candidate_index = 0u; candidate_index < 3u; candidate_index += 1u) {
+    let candidate_weight = pick_weights[candidate_index];
+    if (candidate_weight <= 0.0) {
+      continue;
+    }
+    picked_index = candidate_index;
+    if (pick_target < weight_before + candidate_weight) {
+      break;
+    }
+    weight_before += candidate_weight;
+  }
+  let pick_probability = pick_weights[picked_index] / total_weight;
+  let picked_sample = (*samples)[picked_index];
+  let visibility = int_direct_sample_visibility(picked_sample, point, transparent_bounces);
+  if (visibility.x <= 0.0 && visibility.y <= 0.0 && visibility.z <= 0.0) {
+    return;
+  }
+  let rescaled = (*unshadowed_values)[picked_index] / pick_probability;
+  *radiance += int_clamp_contribution(rescaled * visibility, i32(bounce));
 }
 
 fn int_eval_henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
@@ -1163,6 +1229,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       let picks_through_tree = lgt_use_light_tree() && (kernel_params.light_count + kernel_params.emissive_triangle_count) > 0u;
       let closure_has_transmission = (SCENE_HAS_GLASS || SCENE_HAS_DIFFUSE_TRANSMISSION) && int_closure_has_transmission(&closure);
       // The white-noise sampler hands out draws in order, not by slot, so skipping the loop would shift the draws that follow it.
+      let pick_one_shadow_ray = (kernel_params.kernel_flags & KERNEL_FLAG_SHADOW_RAY_PICK) != 0u;
+      var candidate_samples: array<LgtDirectSample, 3>;
+      var candidate_unshadowed = array<vec3<f32>, 3>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
       let direct_source_count = select(0u, 3u, rng.use_sobol_burley == 0u || int_closure_has_evaluable_lobe(&closure));
       for (var direct_source = 0u; direct_source < direct_source_count; direct_source += 1u) {
         if ((kernel_params.kernel_flags & KERNEL_FLAG_TEST_BSDF_ONLY) != 0u) {
@@ -1200,7 +1269,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             direct_sample = lgt_sample_environment(point.position, smp_next_4d(&rng));
           }
         }
-        int_accumulate_direct_sample(direct_sample, &closure, &point, wo, throughput, medium_sigma, in_medium, bounce, transparent_bounces, &sample_radiance);
+        if (pick_one_shadow_ray) {
+          candidate_samples[direct_source] = direct_sample;
+          candidate_unshadowed[direct_source] = int_direct_sample_unshadowed(direct_sample, &closure, wo, throughput, medium_sigma, in_medium);
+        } else {
+          int_accumulate_direct_sample(direct_sample, &closure, &point, wo, throughput, medium_sigma, in_medium, bounce, transparent_bounces, &sample_radiance);
+        }
+      }
+      if (pick_one_shadow_ray && direct_source_count > 0u) {
+        smp_seek(&rng, step, SMP_SLOT_SHADOW_PICK);
+        int_accumulate_picked_direct_sample(&candidate_samples, &candidate_unshadowed, &point, smp_next_1d(&rng), bounce, transparent_bounces, &sample_radiance);
       }
 
       smp_seek(&rng, step, SMP_SLOT_SURFACE_BSDF);

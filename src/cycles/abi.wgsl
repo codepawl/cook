@@ -53,6 +53,9 @@ const KERNEL_FLAG_PATH_REGENERATION: u32 = 1024u;
 // stores mip levels is read at the level the footprint asks for. Clear (default): every texture is read at level 0, as Blender
 // Cycles does.
 const KERNEL_FLAG_TEXTURE_MIPS: u32 = 2048u;
+// Set: each vertex traces one shadow ray for one of its direct light samples, picked in proportion to the luminance of the unshadowed
+// contribution, instead of one ray per sample. Same mean, fewer rays. Clear (default): every direct sample gets its own shadow ray.
+const KERNEL_FLAG_SHADOW_RAY_PICK: u32 = 4096u;
 
 // `KernelParamsV2.filter_type` values.
 const FILTER_BOX: u32 = 0u;
