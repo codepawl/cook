@@ -29,16 +29,18 @@ Packing and reading scenes is JavaScript only. The packers and `pack-file.mjs` i
 
 You need Node 20.19 or newer and the driver of your GPU. On Windows x64 and Linux x64 you do not need Rust: Cook downloads a prebuilt addon.
 
-1. If you use Linux, install the Vulkan loader. On Debian or Ubuntu:
+1. If you use Linux, install the Vulkan loader and the libraries that the NVIDIA Vulkan driver loads. On Debian or Ubuntu:
 
    ```sh
-   sudo apt install libvulkan1
+   sudo apt install libvulkan1 libegl1 libgl1 libx11-6 libxext6
    ```
+
+   A desktop system usually has the last four already. A server or a container needs them. In Docker, also set `NVIDIA_DRIVER_CAPABILITIES=all`, so that the container gets the graphics part of the driver.
 
 2. Install a released version of Cook:
 
    ```sh
-   npm install github:codepawl/cook#v0.1.0
+   npm install github:codepawl/cook#v0.1.1
    ```
 
    If npm says `Fetching packages of type "git" have been disabled`, add `--allow-git=all` to the command. npm 12 needs it for a package from GitHub.
@@ -93,7 +95,7 @@ On Linux:
 
 Then, on both systems:
 
-1. Install Cook. Leave out `#v0.1.0` to get the newest commit.
+1. Install Cook. Leave out `#v0.1.1` to get the newest commit.
 
    ```sh
    npm install github:codepawl/cook
@@ -112,7 +114,7 @@ Installing runs no script. Building takes the Rust crates listed in `Cargo.lock`
 | Message | Cause and fix |
 | :--- | :--- |
 | `No Vulkan adapter` | The Vulkan loader or the GPU driver is missing. Install the driver of your GPU and, on Linux, `libvulkan1`. |
-| `The Vulkan adapter does not support ray queries.` | The GPU is too old, or only a software adapter (llvmpipe) is visible. See the cloud note below. |
+| `The Vulkan adapter does not support ray queries` | The message names the adapter. If it says "software adapter", the GPU driver did not load: install the libraries of step 1, and see the cloud note below. Otherwise the GPU is too old. |
 | `Refusing to fetch "github:codepawl/cook..."` | npm 12 blocks packages from GitHub. Add `--allow-git=all` to `npm install`. |
 | Exit code 5 | The addon is missing, does not load or did not download. Run `npx cook fetch-addon` again, or build from source. |
 

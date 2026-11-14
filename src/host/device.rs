@@ -47,6 +47,22 @@ pub(crate) fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLay
     )
 }
 
+/// The error for an adapter without ray queries. It names the adapter, because a software adapter (llvmpipe, lavapipe)
+/// means the GPU driver did not load, which has a different fix than a GPU that is too old.
+pub(crate) fn missing_ray_query_message(adapter_name: &str, device_type: wgpu::DeviceType) -> String {
+    if device_type == wgpu::DeviceType::Cpu {
+        return format!(
+            "The Vulkan adapter does not support ray queries: Cook found only the software adapter \"{adapter_name}\", so the Vulkan driver of the GPU did not load. \
+             Install the GPU driver; on a Linux server or container also install libegl1, libgl1, libx11-6 and libxext6, \
+             and in Docker set NVIDIA_DRIVER_CAPABILITIES=all. `vulkaninfo --summary` lists the adapters Vulkan sees."
+        );
+    }
+    format!(
+        "The Vulkan adapter does not support ray queries: \"{adapter_name}\" does not report VK_KHR_ray_query. \
+         Cook needs a GPU that does, such as NVIDIA RTX, AMD Radeon RX 6000, Intel Arc or newer, with a current driver."
+    )
+}
+
 pub(crate) fn open_device() -> Result<(wgpu::Device, wgpu::Queue, wgpu::AdapterInfo)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
@@ -58,7 +74,8 @@ pub(crate) fn open_device() -> Result<(wgpu::Device, wgpu::Queue, wgpu::AdapterI
     }))
     .map_err(|error| failure(format!("No Vulkan adapter: {error}")))?;
     if !adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
-        return Err(failure("The Vulkan adapter does not support ray queries."));
+        let adapter_info = adapter.get_info();
+        return Err(failure(missing_ray_query_message(&adapter_info.name, adapter_info.device_type)));
     }
     let adapter_limits = adapter.limits();
     let required_limits = wgpu::Limits {
@@ -82,8 +99,25 @@ pub(crate) fn open_device() -> Result<(wgpu::Device, wgpu::Queue, wgpu::AdapterI
 
 #[cfg(test)]
 mod tests {
-    use super::padded_storage_bytes;
+    use super::{missing_ray_query_message, padded_storage_bytes};
     use std::borrow::Cow;
+
+    #[test]
+    fn a_software_adapter_is_named_with_the_driver_fix() {
+        let message = missing_ray_query_message("llvmpipe (LLVM 15.0.7, 256 bits)", wgpu::DeviceType::Cpu);
+        assert!(message.starts_with("The Vulkan adapter does not support ray queries: "));
+        assert!(message.contains("software adapter \"llvmpipe (LLVM 15.0.7, 256 bits)\""));
+        assert!(message.contains("libegl1, libgl1, libx11-6 and libxext6"));
+        assert!(message.contains("NVIDIA_DRIVER_CAPABILITIES=all"));
+    }
+
+    #[test]
+    fn a_gpu_without_ray_queries_is_named_with_the_cards_that_have_them() {
+        let message = missing_ray_query_message("NVIDIA GeForce GTX 1080", wgpu::DeviceType::DiscreteGpu);
+        assert!(message.starts_with("The Vulkan adapter does not support ray queries: "));
+        assert!(message.contains("\"NVIDIA GeForce GTX 1080\" does not report VK_KHR_ray_query"));
+        assert!(!message.contains("software adapter"));
+    }
 
     #[test]
     fn padded_storage_bytes_borrows_bytes_that_already_fit() {
