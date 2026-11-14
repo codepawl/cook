@@ -128,7 +128,20 @@ function validateTexturePoolMaxBytes(value, callerName) {
   return value;
 }
 
-const DEFAULT_HDRI_RADIANCE_LIMIT = 16;
+// No limit by default: Blender Cycles reads an environment image as it is, so a sun of tens of thousands keeps its energy.
+// `hdriRadianceLimit` caps every texel for a caller that trades that energy for less noise.
+const DEFAULT_HDRI_RADIANCE_LIMIT = Infinity;
+
+/** The cap on environment texels: `undefined` or `Infinity` is no cap (the default), a positive number caps each channel. */
+export function resolveHdriRadianceLimit(hdriRadianceLimit, callerName) {
+  if (hdriRadianceLimit === undefined) {
+    return DEFAULT_HDRI_RADIANCE_LIMIT;
+  }
+  if (typeof hdriRadianceLimit !== 'number' || Number.isNaN(hdriRadianceLimit) || hdriRadianceLimit <= 0) {
+    throw new RangeError(`${callerName}: \`hdriRadianceLimit\` must be a number above 0, or Infinity for no limit (got ${hdriRadianceLimit}). Leave it out to keep the environment image as it is, like Cycles.`);
+  }
+  return hdriRadianceLimit;
+}
 const SUN_DEFAULT_HALF_ANGLE = Math.PI / 360;
 const IDENTITY_MATRIX_4X4 = Object.freeze([
   1, 0, 0, 0,
@@ -1719,9 +1732,7 @@ function packEnvironmentTexelsV2(environment, options = {}) {
   const channels = Math.max(3, Math.round(environment.channels ?? 3));
   const source = environment.data;
   const intensity = Number(environment.intensity ?? 1);
-  const radianceLimit = options.hdriRadianceLimit === undefined
-    ? DEFAULT_HDRI_RADIANCE_LIMIT
-    : Number(options.hdriRadianceLimit);
+  const radianceLimit = resolveHdriRadianceLimit(options.hdriRadianceLimit, 'buildNativeInputV2');
   const envRotation = environment.rotation !== undefined
     ? Number(environment.rotation)
     : Math.atan2(Number(environment.sine ?? 0), Number(environment.cosine ?? 1));
