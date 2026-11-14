@@ -772,7 +772,7 @@ mod tests {
     #[test]
     fn an_image_wider_than_the_dispatch_limit_is_refused() {
         let limits = wgpu::Limits {
-            max_storage_buffer_binding_size: u32::MAX,
+            max_storage_buffer_binding_size: u64::MAX,
             max_buffer_size: u64::MAX,
             ..wgpu::Limits::default()
         };
