@@ -95,6 +95,8 @@ const MATERIAL_FLAG_THIN_WALLED = 2;
 const MATERIAL_FLAG_TRANSPARENT_SHADOW = 4;
 const MATERIAL_FLAG_DOUBLE_SIDED = 8;
 const MATERIAL_FLAG_EMISSIVE_MIS = 16;
+// The weight under which closure.wgsl drops a coat or sheen layer (CLOSURE_WEIGHT_CUTOFF).
+const CLOSURE_WEIGHT_CUTOFF = 1e-5;
 const MATERIAL_FLAG_F82_METALLIC = 32;
 
 const ALPHA_MODE_OPAQUE = 0;
@@ -758,6 +760,15 @@ function packMaterialTable(materialRecords) {
   return { table, usesDiffuseTransmission };
 }
 
+// The kernel never reads `shadow_terminator_offset`, so a nonzero value would render like 0 and look like a Cycles mismatch.
+function requireUnsupportedShadowTerminatorOffsetZero(offset, instanceIndex) {
+  const value = Number(offset ?? 0);
+  if (value !== 0) {
+    throw new RangeError(`Instance ${instanceIndex}: shadowTerminatorOffset ${String(offset)} is not supported yet, the kernel does not shift the shading normal for the shadow terminator. Leave it out or pass 0.`);
+  }
+  return 0;
+}
+
 /**
  * Packs one `MaterialRecord` (256 B) matching `FORMAT-v2.md` section 4 and `src/cycles/abi.wgsl`.
  */
@@ -884,7 +895,10 @@ export function packMaterialRecordV2(material = {}, textureCollector = null) {
   if (material.doubleSided !== false) {
     flags |= MATERIAL_FLAG_DOUBLE_SIDED;
   }
-  if (emissionStrength > 0 && luminance(emissionColor) > 0 && material.emissiveMis !== false) {
+  // A coat or sheen layer attenuates the emission a ray sees when it hits the surface, but a light sample takes the raw radiance,
+  // so the two strategies would estimate different values. Such an emitter is found by rays that hit it only.
+  const hasEmissionLayer = coatWeight > CLOSURE_WEIGHT_CUTOFF || sheenWeight > CLOSURE_WEIGHT_CUTOFF;
+  if (emissionStrength > 0 && luminance(emissionColor) > 0 && material.emissiveMis !== false && !hasEmissionLayer) {
     flags |= MATERIAL_FLAG_EMISSIVE_MIS;
   }
   if ((hasExplicitF82 && metallic > 0) || material.f82Metallic) {
@@ -2821,7 +2835,7 @@ function packInstancedGeometry(instancesInput, rawMaterials, textureCollector, r
       emissiveBaseOffset,
       objectId,
       objectRandom: inst.objectRandom !== undefined ? Number(inst.objectRandom) : deterministicUnitHash(objectId),
-      shadowTerminatorOffset: Number(inst.shadowTerminatorOffset ?? 0),
+      shadowTerminatorOffset: requireUnsupportedShadowTerminatorOffsetZero(inst.shadowTerminatorOffset, instIdx),
       objectColor: inst.objectColor ?? [1, 1, 1, 1],
     });
   }
@@ -3198,7 +3212,7 @@ export function reduceV1MaterialTable({ materials: matSource, atlas: atlasWords,
       packedMat.meanEmissiveRadiance[1] * emissionTex.meanLinearRgb[1],
       packedMat.meanEmissiveRadiance[2] * emissionTex.meanLinearRgb[2],
     ];
-    packedMat.isEmissive = luminance(packedMat.meanEmissiveRadiance) > 0;
+    packedMat.isEmissive = packedMat.isEmissive && luminance(packedMat.meanEmissiveRadiance) > 0;
     materialRecords.push(packedMat);
   }
   return { materialRecords, materialLightMasks, materialShadowOnly, textureCollector };

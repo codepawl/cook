@@ -146,6 +146,14 @@ fn base_layer_lobe_bound(inputs: &BaseLayerInputs) -> u32 {
     lobes
 }
 
+/// The most lobes `closure_build` can add before it prunes to `MAX_CLOSURE_LOBES`: transparent, sheen, coat, metal, two
+/// thin-glass lobes, specular, diffuse and diffuse transmission. The scratch array of `closure_build` has this many slots.
+const MAX_CLOSURE_CANDIDATE_LOBES: u32 = 9;
+
+fn clamp_candidate_lobes(candidate_lobes: u32) -> u32 {
+    candidate_lobes.clamp(1, MAX_CLOSURE_CANDIDATE_LOBES)
+}
+
 /// Checks that the counts the specializer reads from the napi input equal the counts the kernel reads from
 /// `kernel_params`, so the specialized flags and lobe bounds describe the data the shader really walks.
 pub(crate) fn check_counts_match_kernel_params(input: &NativeTraceInputV2) -> Result<()> {
@@ -394,7 +402,7 @@ pub(crate) fn scan_scene_specialization(input: &NativeTraceInputV2) -> SceneSpec
             thin_walled: (flags & MATERIAL_FLAG_THIN_WALLED) != 0,
         });
         let candidate_lobes = trans_lobe + sheen_lobe + coat_lobe + base_lobes + diffuse_transmission_lobe;
-        max_closure_candidates = max_closure_candidates.max(candidate_lobes.clamp(1, 7));
+        max_closure_candidates = max_closure_candidates.max(clamp_candidate_lobes(candidate_lobes));
         max_closure_lobes = max_closure_lobes.max(candidate_lobes.clamp(1, 4));
     }
 
@@ -551,7 +559,7 @@ pub(crate) fn specialize_kernel_source(source: &str, scene: &SceneSpecialization
     }
     if max_closure_candidates < 7 {
         result = result.replace(
-            "const MAX_CLOSURE_CANDIDATES: u32 = 7u; // SPECIALIZE_CANDIDATES",
+            "const MAX_CLOSURE_CANDIDATES: u32 = 9u; // SPECIALIZE_CANDIDATES",
             &format!("const MAX_CLOSURE_CANDIDATES: u32 = {max_closure_candidates}u; // SPECIALIZE_CANDIDATES"),
         );
     }
@@ -677,7 +685,7 @@ mod specialization_tests {
                       const SCENE_HAS_LIGHT_LINKING: bool = true;\n\
                       const SCENE_HAS_LIGHT_TREE: bool = true;\n\
                       const MAX_CLOSURE_LOBES: u32 = 4u; // SPECIALIZE_LOBES
-                      const MAX_CLOSURE_CANDIDATES: u32 = 7u; // SPECIALIZE_CANDIDATES";
+                      const MAX_CLOSURE_CANDIDATES: u32 = 9u; // SPECIALIZE_CANDIDATES";
         let result = specialize_cycles_kernel(source, &input);
         assert!(result.contains("const SCENE_HAS_VOLUME: bool = false;"), "VOLUME should be false");
         assert!(result.contains("const SCENE_HAS_GLASS: bool = false;"), "GLASS should be false");
@@ -976,6 +984,19 @@ fn ").unwrap_or(sample_body.len());
             lobes += 2;
         }
         lobes
+    }
+
+    #[test]
+    fn a_thin_walled_material_with_every_layer_gets_all_its_candidate_slots() {
+        let inputs = BaseLayerInputs { thin_walled: true, ..opaque_inputs(0.5, 0.5) };
+        let base_lobes = base_layer_lobe_bound(&inputs);
+        assert_eq!(base_lobes, 5);
+        // Transparent, sheen and coat on top of the base layers.
+        assert_eq!(clamp_candidate_lobes(base_lobes + 3), 8);
+        // Diffuse transmission adds the ninth.
+        assert_eq!(clamp_candidate_lobes(base_lobes + 4), 9);
+        assert_eq!(clamp_candidate_lobes(0), 1);
+        assert_eq!(clamp_candidate_lobes(12), MAX_CLOSURE_CANDIDATE_LOBES);
     }
 
     #[test]

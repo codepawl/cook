@@ -128,7 +128,7 @@ Both 3×4 affine transforms are stored as three row vectors `row0..row2`: transf
 | `128` | `4` | `4` | `u32` | `emissive_base_offset` | Base index in `emissive_triangles` for this instance, or `0xFFFFFFFF` if non-emissive |
 | `132` | `4` | `4` | `u32` | `object_id` | Cycles Object Info `Object Index` |
 | `136` | `4` | `4` | `f32` | `object_random` | Deterministic `[0, 1)` per-instance Object Info `Random` hash |
-| `140` | `4` | `4` | `f32` | `shadow_terminator_offset` | Cycles shadow terminator normal shift in `[0, 1)` |
+| `140` | `4` | `4` | `f32` | `shadow_terminator_offset` | Reserved, must be 0: the kernel does not read it and the packer rejects a nonzero `shadowTerminatorOffset` |
 | `144` | `16` | `16` | `vec4<f32>` | `object_color` | Cycles Object Info linear RGBA colour |
 
 ---

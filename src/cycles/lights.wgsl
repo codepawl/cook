@@ -36,6 +36,9 @@ var<private> lgt_mis_picked_by_tree: bool = false;
 var<private> lgt_mis_position: vec3<f32> = vec3<f32>(0.0);
 var<private> lgt_mis_normal: vec3<f32> = vec3<f32>(0.0, 0.0, 1.0);
 var<private> lgt_mis_has_transmission: bool = false;
+// True after a volume scatter: its direct light step draws no emissive triangle, so a ray from there that hits one has no
+// light sample to share the weight with.
+var<private> lgt_mis_is_volume_origin: bool = false;
 
 fn lgt_use_light_tree() -> bool {
   return SCENE_HAS_LIGHT_TREE && (kernel_params.kernel_flags & KERNEL_FLAG_USE_LIGHT_TREE) != 0u;
@@ -46,6 +49,12 @@ fn lgt_remember_mis_origin(position: vec3<f32>, normal: vec3<f32>, has_transmiss
   lgt_mis_normal = normal;
   lgt_mis_has_transmission = has_transmission;
   lgt_mis_picked_by_tree = picked_by_tree;
+  lgt_mis_is_volume_origin = false;
+}
+
+fn lgt_remember_volume_mis_origin(position: vec3<f32>, direction: vec3<f32>) {
+  lgt_remember_mis_origin(position, direction, false, false);
+  lgt_mis_is_volume_origin = true;
 }
 
 // Probability that the direct light pick chose this emitter from the last shading point. `flat_probability` is the
@@ -998,6 +1007,18 @@ fn lgt_sample_environment(shading_pos: vec3<f32>, sample_u4: vec4<f32>) -> LgtDi
   return out;
 }
 
+// The MIS weight of a light found by a ray that left a surface. The debug flags pick one strategy: NEE-only drops the ray's
+// share, BSDF-only keeps all of it, so the two renders can be compared on every kind of light.
+fn lgt_strategy_weight(prev_bsdf_pdf: f32, pdf_nee: f32) -> f32 {
+  if ((kernel_params.kernel_flags & KERNEL_FLAG_TEST_NEE_ONLY) != 0u) {
+    return 0.0;
+  }
+  if ((kernel_params.kernel_flags & KERNEL_FLAG_TEST_BSDF_ONLY) != 0u) {
+    return 1.0;
+  }
+  return lgt_power_heuristic(prev_bsdf_pdf, pdf_nee);
+}
+
 fn lgt_eval_analytic_lights_along_segment(
   ray_origin: vec3<f32>,
   ray_dir: vec3<f32>,
@@ -1063,7 +1084,7 @@ fn lgt_eval_analytic_lights_along_segment(
         var disk_mis_weight = 1.0;
         if (!(is_camera_ray || mis_skip)) {
           let disk_pdf_nee = lgt_selection_probability(index, light.selection_pdf) * disk_pdf_solid_angle;
-          disk_mis_weight = lgt_power_heuristic(prev_bsdf_pdf, disk_pdf_nee);
+          disk_mis_weight = lgt_strategy_weight(prev_bsdf_pdf, disk_pdf_nee);
         }
         let disk_medium_atten = select(vec3<f32>(1.0), exp(-medium_sigma * max(disk_hit_t - t_min, 0.0)), in_medium);
         total += light.radiance * disk_medium_atten * (disk_spot_weight * disk_falloff * disk_mis_weight);
@@ -1099,7 +1120,7 @@ fn lgt_eval_analytic_lights_along_segment(
       var mis_weight = 1.0;
       if (!(is_camera_ray || mis_skip)) {
         let pdf_nee = lgt_selection_probability(index, light.selection_pdf) * pdf_solid_angle;
-        mis_weight = lgt_power_heuristic(prev_bsdf_pdf, pdf_nee);
+        mis_weight = lgt_strategy_weight(prev_bsdf_pdf, pdf_nee);
       }
       let medium_atten = select(vec3<f32>(1.0), exp(-medium_sigma * max(hit_t - t_min, 0.0)), in_medium);
       total += light.radiance * medium_atten * (spot_weight * falloff * mis_weight);
@@ -1163,7 +1184,7 @@ fn lgt_eval_analytic_lights_along_segment(
       var mis_weight = 1.0;
       if (!(is_camera_ray || mis_skip)) {
         let pdf_nee = lgt_selection_probability(index, light.selection_pdf) * pdf_solid_angle;
-        mis_weight = lgt_power_heuristic(prev_bsdf_pdf, pdf_nee);
+        mis_weight = lgt_strategy_weight(prev_bsdf_pdf, pdf_nee);
       }
       let medium_atten = select(vec3<f32>(1.0), exp(-medium_sigma * max(hit_t - t_min, 0.0)), in_medium);
       total += light.radiance * medium_atten * (spread_weight * falloff * mis_weight);
@@ -1195,7 +1216,7 @@ fn lgt_eval_escaped_ray(
     var env_mis = 1.0;
     if (!is_camera_ray && !mis_skip && SCENE_HAS_ENV_IMPORTANCE && kernel_params.env_width > 0u && kernel_params.env_height > 0u && kernel_params.background_mis_weight > 0.0) {
       let pdf_env = lgt_environment_pdf(lgt_mis_position, ray_dir);
-      env_mis = lgt_power_heuristic(prev_bsdf_pdf, pdf_env);
+      env_mis = lgt_strategy_weight(prev_bsdf_pdf, pdf_env);
     }
     total += env_radiance * env_mis;
   }
@@ -1229,7 +1250,7 @@ fn lgt_eval_escaped_ray(
     var sun_mis = 1.0;
     if (!(is_camera_ray || mis_skip)) {
       let pdf_nee = lgt_selection_probability(index, light.selection_pdf) / max(TWO_PI * one_minus_cos, 1.0e-30);
-      sun_mis = lgt_power_heuristic(prev_bsdf_pdf, pdf_nee);
+      sun_mis = lgt_strategy_weight(prev_bsdf_pdf, pdf_nee);
     }
     total += light.radiance * sun_mis;
   }
@@ -1256,7 +1277,7 @@ fn lgt_emissive_surface_weight(
       return 0.0;
     }
   }
-  if (is_camera_ray || mis_skip || emitter.area <= 0.0) {
+  if (is_camera_ray || mis_skip || emitter.area <= 0.0 || lgt_mis_is_volume_origin) {
     return 1.0;
   }
   if ((kernel_params.kernel_flags & KERNEL_FLAG_TEST_NEE_ONLY) != 0u) {
