@@ -1,6 +1,6 @@
 // Cook: loads the native addon built by `npm run build` and traces a packed scene on the GPU with Vulkan ray queries.
 // The addon is not in the npm package; without it `findNativeAddon()` returns null.
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -386,12 +386,58 @@ export function traceNativeTexels(input, texels, { samples, maxSeconds }) {
 export function loadNativeAddon() {
   const addonPath = findNativeAddon();
   if (!addonPath) throw new Error('The native tracer is not built. Run `npx cook fetch-addon` to download the prebuilt one (Windows x64, Linux x64), or `npm run build` in the Cook package to compile it with Rust, or set COOK_ADDON_PATH to a built render-native.node.');
+  let addon;
   try {
-    return createRequire(import.meta.url)(addonPath);
+    addon = createRequire(import.meta.url)(addonPath);
   } catch (loadError) {
     throw new Error(
       `The native addon at ${JSON.stringify(addonPath)} cannot be loaded: ${loadError.message}. Build it again with \`npm run build\` on this machine, or point COOK_ADDON_PATH at a matching render-native.node.`,
       { cause: loadError }
+    );
+  }
+  verifyAddonBuildInfo(addon, addonPath);
+  return addon;
+}
+
+const warnedAddonPaths = new Set();
+
+/** The version the package.json next to this file declares: the addon built from this checkout reports the same one. */
+function readPackageVersion() {
+  const packageJsonPath = join(PACKAGE_DIRECTORY, 'package.json');
+  return JSON.parse(readFileSync(packageJsonPath, 'utf8')).version;
+}
+
+/**
+ * Compares what an addon reports about its build (`addonBuildInfo()`) with this package. Returns
+ * `{ status: 'match' }`, `{ status: 'unknown' }` for an addon that lacks the export (prebuilt v0.1.0 and v0.1.1), or
+ * `{ status: 'mismatch', differences: [...] }` where each difference says what differs.
+ */
+export function compareAddonBuildInfo(addonBuildInfo, expected = { version: readPackageVersion(), packRevision: PACK_REVISION }) {
+  if (typeof addonBuildInfo !== 'function') return { status: 'unknown' };
+  const reported = addonBuildInfo();
+  const differences = [];
+  if (reported.version !== expected.version) {
+    differences.push(`the addon was built from version ${reported.version} and the package is version ${expected.version}`);
+  }
+  if (reported.packRevision !== expected.packRevision) {
+    differences.push(`the addon reads pack revision ${reported.packRevision} and the package writes pack revision ${expected.packRevision}`);
+  }
+  return differences.length === 0 ? { status: 'match' } : { status: 'mismatch', differences };
+}
+
+/** Throws when the addon was built from other sources than this package; warns once when it cannot tell. */
+export function verifyAddonBuildInfo(addon, addonPath, expected) {
+  const result = compareAddonBuildInfo(addon.addonBuildInfo, expected);
+  if (result.status === 'mismatch') {
+    throw new Error(
+      `The native addon at ${JSON.stringify(addonPath)} does not match this package: ${result.differences.join('; ')}. Run \`npx cook fetch-addon\` to download the addon of this version, or \`npm run build\` to compile it from these sources.`
+    );
+  }
+  if (result.status === 'unknown' && !warnedAddonPaths.has(addonPath)) {
+    warnedAddonPaths.add(addonPath);
+    process.emitWarning(
+      `The native addon at ${JSON.stringify(addonPath)} predates the version check, so Cook cannot tell whether it matches this package. If renders fail oddly, run \`npx cook fetch-addon\` or \`npm run build\`.`,
+      'CookAddonWarning'
     );
   }
 }

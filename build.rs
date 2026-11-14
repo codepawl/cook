@@ -46,8 +46,48 @@ fn rust_byte_array_literal(bytes: &[u8]) -> String {
     text
 }
 
+fn read_package_version(package_json_text: &str) -> String {
+    for line in package_json_text.lines() {
+        let Some(after_key) = line.strip_prefix("  \"version\":") else {
+            continue;
+        };
+        let version = after_key.trim().trim_end_matches(',').trim().trim_matches('"');
+        if !version.is_empty() {
+            return version.to_string();
+        }
+    }
+    panic!("package.json has no top-level \"version\" field");
+}
+
+fn read_pack_revision(packer_text: &str) -> String {
+    for line in packer_text.lines() {
+        let Some(after_name) = line.trim().strip_prefix("export const PACK_REVISION =") else {
+            continue;
+        };
+        let digits = after_name.trim().trim_end_matches(';').trim();
+        if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return digits.to_string();
+        }
+    }
+    panic!("pack-input-v2.mjs has no `export const PACK_REVISION = <number>;` line");
+}
+
+/// The addon reports these two values so the JavaScript package can tell when it loaded an addon built from other sources.
+fn export_addon_build_info() {
+    for tracked in ["package.json", "pack-input-v2.mjs"] {
+        println!("cargo:rerun-if-changed={tracked}");
+    }
+    let package_json_text = fs::read_to_string("package.json")
+        .unwrap_or_else(|error| panic!("Could not read package.json: {error}"));
+    let packer_text = fs::read_to_string("pack-input-v2.mjs")
+        .unwrap_or_else(|error| panic!("Could not read pack-input-v2.mjs: {error}"));
+    println!("cargo:rustc-env=COOK_PACKAGE_VERSION={}", read_package_version(&package_json_text));
+    println!("cargo:rustc-env=COOK_PACK_REVISION={}", read_pack_revision(&packer_text));
+}
+
 fn main() {
     napi_build::setup();
+    export_addon_build_info();
 
     let cycles_directory = PathBuf::from("src").join("cycles");
     let manifest_path = cycles_directory.join("kernel-manifest.txt");
