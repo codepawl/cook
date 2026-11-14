@@ -5,6 +5,8 @@
 // `kernel/integrator/{shade_surface.h,shade_light.h,shade_background.h,intersect_closest.h,intersect_shadow.h}`.
 
 const INT_MAX_PATH_STEPS: u32 = 128u;
+// Cycles' default `light_sampling_threshold`.
+const INT_LIGHT_THRESHOLD: f32 = 0.01;
 const INT_ADAPTIVE_BATCH_SIZE: u32 = 8u;
 const INT_ADAPTIVE_LUMINANCE_FLOOR: f32 = 1.0e-3;
 
@@ -605,6 +607,9 @@ fn int_accumulate_direct_sample(
   bounce: u32,
   transparent_bounces: u32,
   radiance: ptr<function, vec3<f32>>,
+  rng: ptr<function, SmpState>,
+  step: u32,
+  threshold_slot: u32,
 ) {
   if (sample.valid == 0u || sample.pdf <= 0.0) {
     return;
@@ -624,6 +629,20 @@ fn int_accumulate_direct_sample(
   }
   if (unshadowed.x <= 0.0 && unshadowed.y <= 0.0 && unshadowed.z <= 0.0) {
     return;
+  }
+
+  if ((kernel_params.kernel_flags & KERNEL_FLAG_LIGHT_THRESHOLD) != 0u) {
+    let with_path = (kernel_params.kernel_flags & KERNEL_FLAG_LIGHT_THRESHOLD_PATH) != 0u;
+    let light_term = bsdf.value * sample.radiance * (mis_weight / sample.pdf);
+    let measured = select(light_term, unshadowed, with_path);
+    let keep_probability = max(measured.x, max(measured.y, measured.z)) / INT_LIGHT_THRESHOLD;
+    if (keep_probability < 1.0) {
+      smp_seek(rng, step, threshold_slot);
+      if (smp_next_1d(rng) >= keep_probability) {
+        return;
+      }
+      unshadowed /= keep_probability;
+    }
   }
 
   var visibility = vec3<f32>(1.0);
@@ -1101,7 +1120,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             direct_sample = lgt_sample_environment(point.position, smp_next_4d(&rng));
           }
         }
-        int_accumulate_direct_sample(direct_sample, &closure, &point, wo, throughput, medium_sigma, in_medium, bounce, transparent_bounces, &sample_radiance);
+        let threshold_slot = select(SMP_SLOT_LIGHT_THRESHOLD, SMP_SLOT_ENVIRONMENT_THRESHOLD, direct_source == 2u);
+        int_accumulate_direct_sample(direct_sample, &closure, &point, wo, throughput, medium_sigma, in_medium, bounce, transparent_bounces, &sample_radiance, &rng, step, threshold_slot);
       }
 
       smp_seek(&rng, step, SMP_SLOT_SURFACE_BSDF);

@@ -53,6 +53,13 @@ const KERNEL_FLAG_PATH_REGENERATION: u32 = 1024u;
 // stores mip levels is read at the level the footprint asks for. Clear (default): every texture is read at level 0, as Blender
 // Cycles does.
 const KERNEL_FLAG_TEXTURE_MIPS: u32 = 2048u;
+// Light sampling threshold (`lightThreshold` of the packer; Cycles `light_sampling_threshold`). Set: a direct light sample
+// whose contribution is below the threshold traces its shadow ray only with a probability equal to contribution over
+// threshold, and is scaled up by the inverse, so the picture stays unbiased and weak samples cost no ray.
+const KERNEL_FLAG_LIGHT_THRESHOLD: u32 = 4096u;
+// With KERNEL_FLAG_LIGHT_THRESHOLD: measure the contribution with the path throughput, so a sample deep in a dim path is
+// dropped more often. Clear: without the throughput, as Cycles measures it.
+const KERNEL_FLAG_LIGHT_THRESHOLD_PATH: u32 = 8192u;
 
 // `KernelParamsV2.filter_type` values.
 const FILTER_BOX: u32 = 0u;

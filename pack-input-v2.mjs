@@ -54,6 +54,12 @@ export const KERNEL_FLAG_LIGHT_TREE_PROBE = 128;
 const KERNEL_FLAG_TEST_NEE_ONLY = 256;
 const KERNEL_FLAG_TEST_BSDF_ONLY = 512;
 export const VALID_DIRECT_LIGHTING = Object.freeze(['both', 'nee-only', 'bsdf-only']);
+/**
+ * `lightThreshold`: `off` traces the shadow ray of every direct light sample. `cycles` drops a sample whose contribution
+ * is below 0.01 with a matching probability and scales the survivors up, as Blender Cycles does by default. `path`
+ * measures the contribution with the path throughput, so weak samples deep in a path are dropped more often.
+ */
+export const LIGHT_THRESHOLD_FLAGS = Object.freeze({ off: 0, cycles: 4096, path: 4096 | 8192 });
 const KERNEL_FLAG_HAS_VOLUME = 2;
 const KERNEL_FLAG_HAS_SUBSURFACE = 4;
 const KERNEL_FLAG_ORTHOGRAPHIC_CAMERA = 8;
@@ -2337,6 +2343,13 @@ function packKernelParamsV2({
   if (options.directLighting !== undefined && !VALID_DIRECT_LIGHTING.includes(options.directLighting)) {
     throw new RangeError(`packKernelParamsV2: \`directLighting\` must be "both", "nee-only" or "bsdf-only", got ${JSON.stringify(options.directLighting)}.`);
   }
+  const lightThreshold = options.lightThreshold ?? 'off';
+  if (!Object.hasOwn(LIGHT_THRESHOLD_FLAGS, lightThreshold)) {
+    throw new RangeError(
+      `packKernelParamsV2: \`lightThreshold\` must be "off" (default), "cycles" or "path", got ${JSON.stringify(options.lightThreshold)}.`
+    );
+  }
+  kernelFlags |= LIGHT_THRESHOLD_FLAGS[lightThreshold];
   if (options.directLighting === 'nee-only') {
     kernelFlags |= KERNEL_FLAG_TEST_NEE_ONLY;
   } else if (options.directLighting === 'bsdf-only') {
