@@ -668,6 +668,29 @@ fn int_closure_has_transmission(closure: ptr<function, Closure>) -> bool {
   return false;
 }
 
+// True when closure_eval can return a non-zero value for some direction: it skips lobes without sample weight and transparent lobes,
+// and the glossy, glass and coat evals return zero for a singular alpha. Diffuse, sheen and translucent lobes are always evaluable.
+// When this is false every direct light sample would be rejected after its light and shadow work, so the loop is skipped.
+fn int_closure_has_evaluable_lobe(closure: ptr<function, Closure>) -> bool {
+  for (var lobe_index = 0u; lobe_index < (*closure).lobe_count; lobe_index += 1u) {
+    let lobe = (*closure).lobes[lobe_index];
+    if (lobe.sample_weight <= 0.0) {
+      continue;
+    }
+    let is_microfacet_lobe = lobe.lobe_type == LOBE_GLOSSY_GGX || lobe.lobe_type == LOBE_GLASS_GGX || lobe.lobe_type == LOBE_COAT_GGX;
+    if (is_microfacet_lobe) {
+      if (!bsdf_mf_is_singular(lobe.alpha_x, lobe.alpha_y)) {
+        return true;
+      }
+      continue;
+    }
+    if (lobe.lobe_type == LOBE_DIFFUSE || lobe.lobe_type == LOBE_SHEEN || lobe.lobe_type == LOBE_DIFFUSE_TRANSMISSION) {
+      return true;
+    }
+  }
+  return false;
+}
+
 fn int_accumulate_direct_sample(
   sample: LgtDirectSample,
   closure: ptr<function, Closure>,
@@ -1139,7 +1162,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
       let picks_through_tree = lgt_use_light_tree() && (kernel_params.light_count + kernel_params.emissive_triangle_count) > 0u;
       let closure_has_transmission = (SCENE_HAS_GLASS || SCENE_HAS_DIFFUSE_TRANSMISSION) && int_closure_has_transmission(&closure);
-      for (var direct_source = 0u; direct_source < 3u; direct_source += 1u) {
+      // The white-noise sampler hands out draws in order, not by slot, so skipping the loop would shift the draws that follow it.
+      let direct_source_count = select(0u, 3u, rng.use_sobol_burley == 0u || int_closure_has_evaluable_lobe(&closure));
+      for (var direct_source = 0u; direct_source < direct_source_count; direct_source += 1u) {
         if ((kernel_params.kernel_flags & KERNEL_FLAG_TEST_BSDF_ONLY) != 0u) {
           break;
         }

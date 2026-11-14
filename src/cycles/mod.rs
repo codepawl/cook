@@ -1565,6 +1565,23 @@ mod tests {
         assert!(kernel.contains("&& !is_diffuse_transmission"), "a sheet is not a medium boundary");
     }
 
+    /// A closure with no evaluable lobe (smooth glass, mirror, pure transparent) skips the direct light loop. The skip must follow
+    /// exactly the lobes `closure_eval` can give light to, or the image would change.
+    #[test]
+    fn the_direct_light_loop_is_skipped_only_when_no_lobe_can_be_evaluated() {
+        let kernel = assemble_cycles_kernel().expect("the kernel assembles");
+        let test_start = kernel.find("fn int_closure_has_evaluable_lobe(").expect("the evaluable lobe test exists");
+        let test_end = test_start + kernel[test_start..].find("\n}").expect("the test ends");
+        let test_body = &kernel[test_start..test_end];
+        assert!(test_body.contains("lobe.sample_weight <= 0.0"));
+        assert!(test_body.contains("bsdf_mf_is_singular(lobe.alpha_x, lobe.alpha_y)"));
+        for evaluable_lobe in ["LOBE_DIFFUSE", "LOBE_SHEEN", "LOBE_DIFFUSE_TRANSMISSION"] {
+            assert!(test_body.contains(&format!("lobe.lobe_type == {evaluable_lobe}")), "{evaluable_lobe} is always evaluable");
+        }
+        assert!(!test_body.contains("LOBE_TRANSPARENT"), "a transparent lobe is never evaluated");
+        assert!(kernel.contains("select(0u, 3u, rng.use_sobol_burley == 0u || int_closure_has_evaluable_lobe(&closure))"));
+    }
+
     /// The mip levels sit after level 0 in one run of words (`texture_fetch_texel` stays the only reader of the pool).
     #[test]
     fn a_mip_level_is_found_by_walking_the_halving_chain_from_level_0() {
