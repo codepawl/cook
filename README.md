@@ -41,6 +41,8 @@ You need Node 20.19 or newer and the driver of your GPU. On Windows x64 and Linu
    npm install github:codepawl/cook#v0.1.0
    ```
 
+   If npm says `Fetching packages of type "git" have been disabled`, add `--allow-git=all` to the command. npm 12 needs it for a package from GitHub.
+
 3. Download the prebuilt addon. It prints `Downloaded the prebuilt addon to` and the path.
 
    ```sh
@@ -105,12 +107,13 @@ Then, on both systems:
 
 Installing runs no script. Building takes the Rust crates listed in `Cargo.lock` from crates.io. From a clone of this repository, run `npm run build` in the clone. `COOK_ADDON_PATH` names an addon built somewhere else. If that path does not exist, Cook stops with an error.
 
-### If the render fails
+### If the install or the render fails
 
 | Message | Cause and fix |
 | :--- | :--- |
 | `No Vulkan adapter` | The Vulkan loader or the GPU driver is missing. Install the driver of your GPU and, on Linux, `libvulkan1`. |
 | `The Vulkan adapter does not support ray queries.` | The GPU is too old, or only a software adapter (llvmpipe) is visible. See the cloud note below. |
+| `Refusing to fetch "github:codepawl/cook..."` | npm 12 blocks packages from GitHub. Add `--allow-git=all` to `npm install`. |
 | Exit code 5 | The addon is missing, does not load or did not download. Run `npx cook fetch-addon` again, or build from source. |
 
 On a rented Linux GPU box, the host sometimes gives the container only the compute libraries of the NVIDIA driver. Then `vulkaninfo --summary` lists only `llvmpipe`. Copy the graphics libraries of the same driver version (`libEGL_nvidia`, `libGLX_nvidia`, `libnvidia-glcore`, `libnvidia-eglcore`, `libnvidia-glsi`, `libnvidia-tls`, `libnvidia-glvkspirv`, `libnvidia-rtcore`, `libnvidia-gpucomp`) into `/usr/lib/x86_64-linux-gnu`, and point `/etc/vulkan/icd.d/nvidia_icd.json` at `libEGL_nvidia.so.0`. Then `vulkaninfo | grep VK_KHR_ray_query` finds the extension.
