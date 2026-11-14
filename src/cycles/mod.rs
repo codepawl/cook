@@ -43,6 +43,7 @@ const MAT_FLAGS_BYTE: usize = 192;             // u32[48]
 const MAT_ALPHA_MODE_BYTE: usize = 196;        // u32[49]
 const MAT_METALLIC_ROUGHNESS_TEX_BYTE: usize = 212; // i32[53]
 const MAT_NORMAL_TEX_BYTE: usize = 216;        // i32[54]
+const MAT_EMISSION_TEX_BYTE: usize = 220;      // i32[55]
 const MAT_TRANSMISSION_TEX_BYTE: usize = 224;  // i32[56]
 const MAT_COAT_ROUGHNESS_TEX_BYTE: usize = 228; // i32[57]
 const MAT_COAT_NORMAL_TEX_BYTE: usize = 236;   // i32[59]
@@ -283,6 +284,7 @@ pub(crate) struct SceneSpecialization {
     has_thin_film: bool,
     has_f82: bool,
     has_normal_map: bool,
+    has_emission_map: bool,
     has_diffuse_transmission: bool,
     max_closure_lobes: u32,
     max_closure_candidates: u32,
@@ -312,6 +314,7 @@ pub(crate) fn scan_scene_specialization(input: &NativeTraceInputV2) -> SceneSpec
     let mut has_thin_film = false;
     let mut has_f82 = false;
     let mut has_normal_map = false;
+    let mut has_emission_map = false;
     // A material table that holds a second set of `material_count` records carries the extension records of diffuse
     // transmission (FORMAT-v2.md, "Material extension records"); each material then adds at most one lobe for the far side.
     let has_diffuse_transmission = mat_count > 0 && mats.len() >= 2 * mat_count * MATERIAL_RECORD_STRIDE;
@@ -342,6 +345,7 @@ pub(crate) fn scan_scene_specialization(input: &NativeTraceInputV2) -> SceneSpec
         let normal_tex = read_i32_le(mat, MAT_NORMAL_TEX_BYTE);
         let coat_normal_tex = read_i32_le(mat, MAT_COAT_NORMAL_TEX_BYTE);
         let bump_tex = read_i32_le(mat, MAT_BUMP_TEX_BYTE);
+        let emission_tex = read_i32_le(mat, MAT_EMISSION_TEX_BYTE);
 
         if alpha_mode == ALPHA_MODE_MASK || alpha_tex >= 0 {
             has_alpha_mask = true;
@@ -369,6 +373,9 @@ pub(crate) fn scan_scene_specialization(input: &NativeTraceInputV2) -> SceneSpec
         }
         if normal_tex >= 0 || coat_normal_tex >= 0 || bump_tex >= 0 {
             has_normal_map = true;
+        }
+        if emission_tex >= 0 {
+            has_emission_map = true;
         }
 
         let trans_lobe = u32::from(
@@ -455,6 +462,7 @@ pub(crate) fn scan_scene_specialization(input: &NativeTraceInputV2) -> SceneSpec
         has_thin_film,
         has_f82,
         has_normal_map,
+        has_emission_map,
         has_diffuse_transmission,
         max_closure_lobes,
         max_closure_candidates,
@@ -488,6 +496,7 @@ pub(crate) fn specialize_kernel_source(source: &str, scene: &SceneSpecialization
         has_thin_film,
         has_f82,
         has_normal_map,
+        has_emission_map,
         has_diffuse_transmission,
         max_closure_lobes,
         max_closure_candidates,
@@ -528,6 +537,7 @@ pub(crate) fn specialize_kernel_source(source: &str, scene: &SceneSpecialization
         result = result.replace("const SCENE_HAS_DIFFUSE_TRANSMISSION: bool = false;", "const SCENE_HAS_DIFFUSE_TRANSMISSION: bool = true;");
     }
     specialize!(EMISSIVE_TRIANGLES, has_emissive_triangles);
+    specialize!(EMISSION_MAP, has_emission_map);
     specialize!(ANALYTIC_LIGHTS, has_analytic_lights);
     specialize!(FINITE_LIGHTS, has_finite_lights);
     specialize!(ENV_IMPORTANCE, has_env_importance);
@@ -797,6 +807,22 @@ mod specialization_tests {
         let scene = scan_scene_specialization(&input);
         assert_eq!(specialize_kernel_source(MIP_TEST_SOURCE, &scene, &without_mips), "const SCENE_HAS_TEXTURE_MIPS: bool = false;");
         assert_eq!(specialize_kernel_source(MIP_TEST_SOURCE, &scene, &with_mips), MIP_TEST_SOURCE);
+    }
+
+    #[test]
+    fn the_emission_map_read_of_a_light_sample_compiles_in_only_for_a_scene_with_an_emission_map() {
+        const EMISSION_MAP_TEST_SOURCE: &str = "const SCENE_HAS_EMISSION_MAP: bool = true;";
+        let params = make_kp(0, 0.0, 0, 0, 0.0);
+        let mut plain = make_mat(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, -1, -1);
+        plain[MAT_EMISSION_TEX_BYTE..MAT_EMISSION_TEX_BYTE + 4].copy_from_slice(&(-1i32).to_le_bytes());
+        let mut mapped = plain.clone();
+        mapped[MAT_EMISSION_TEX_BYTE..MAT_EMISSION_TEX_BYTE + 4].copy_from_slice(&3i32.to_le_bytes());
+        let plain_scene = scan_scene_specialization(&dummy_input(&params, &plain, &make_default_light(), &make_default_inst()));
+        let mapped_scene = scan_scene_specialization(&dummy_input(&params, &mapped, &make_default_light(), &make_default_inst()));
+        assert_eq!(specialize_kernel_source(EMISSION_MAP_TEST_SOURCE, &plain_scene, &params), "const SCENE_HAS_EMISSION_MAP: bool = false;");
+        assert_eq!(specialize_kernel_source(EMISSION_MAP_TEST_SOURCE, &mapped_scene, &params), EMISSION_MAP_TEST_SOURCE);
+        let kernel = assemble_cycles_kernel().expect("the kernel assembles");
+        assert!(kernel.contains("if (SCENE_HAS_EMISSION_MAP && mat.emission_tex >= 0) {"));
     }
 
     #[test]

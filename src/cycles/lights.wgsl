@@ -746,7 +746,7 @@ fn lgt_sample_emissive_triangle_at(point: ptr<function, ShadingPoint>, index: u3
   out.wi = wi;
   out.distance = dist;
   out.radiance = emitter.radiance;
-  if (mat.emission_tex >= 0) {
+  if (SCENE_HAS_EMISSION_MAP && mat.emission_tex >= 0) {
     out.radiance = lgt_textured_emitter_radiance(emitter, bary_u, bary_v);
   }
   out.pdf = selection_pdf * pdf_solid_angle;
