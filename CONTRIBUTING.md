@@ -29,6 +29,6 @@ On Windows build for MSVC (`build.mjs` already adds the target). Run `node tools
 2. Run `node tools/make-fixture-pack.mjs` and commit the new `fixtures/room.cookpack`; a test checks that the committed fixture equals a fresh build.
 3. Say what changed in the section "Revision" of `FORMAT-v2.md`.
 
-## How 67js uses Cook
+## How Crucible uses Cook
 
-67js ([codepawl/67.js](https://github.com/codepawl/67.js)) depends on this package at one pinned commit (`git+https://github.com/codepawl/cook.git#<full sha>` in its `devDependencies`). A change here reaches 67js only when a pull request there moves the pin. When you change something 67js calls (the exports, `describeEngine`, the pack format), say so in the pull request so the pin can be moved with a matching change.
+Crucible ([codepawl/crucible](https://github.com/codepawl/crucible)) depends on this package at one pinned commit (`git+https://github.com/codepawl/cook.git#<full sha>` in its `devDependencies`). A change here reaches Crucible only when a pull request there moves the pin. When you change something Crucible calls (the exports, `describeEngine`, the pack format), say so in the pull request so the pin can be moved with a matching change.
