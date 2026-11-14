@@ -144,7 +144,7 @@ export function resolveHdriRadianceLimit(hdriRadianceLimit, callerName) {
   }
   return hdriRadianceLimit;
 }
-const SUN_DEFAULT_HALF_ANGLE = Math.PI / 360;
+export const SUN_DEFAULT_HALF_ANGLE = Math.PI / 360;
 const IDENTITY_MATRIX_4X4 = Object.freeze([
   1, 0, 0, 0,
   0, 1, 0, 0,

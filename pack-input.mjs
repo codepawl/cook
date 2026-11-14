@@ -1,9 +1,34 @@
 // Packs a trace scene into the tables the native kernel reads. It imports nothing from Node, so the job page can run it too.
 // 16 vectors: the 12 of the camera, lights and seed, the fog box and medium, and the subsurface table's first vector index.
-import { PACK_REVISION } from './pack-input-v2.mjs';
+import { PACK_REVISION, SUN_DEFAULT_HALF_ANGLE } from './pack-input-v2.mjs';
 
 const PARAMETER_BYTES = 16 * 16;
-const SUN_CONE_COSINE = Math.cos(Math.PI / 360);
+const DEFAULT_FIREFLY_CLAMP = 20;
+// The kernel compares a sample's brightest channel with the clamp, so a value this large never clamps.
+const NO_FIREFLY_CLAMP = 1e30;
+const NO_FIREFLY_CLAMP_THRESHOLD = 1e29;
+
+// The cosine of the sun's half angle, which the kernel draws its shadow-ray cone from. It reads `sun.angularRadius` like the
+// "cycles" kernel does (pack-input-v2.mjs), and an omitted value keeps the default half angle of 0.5 degrees.
+export function sunConeCosine(sun) {
+  const halfAngle = Math.max(0, Number(sun?.angularRadius ?? SUN_DEFAULT_HALF_ANGLE));
+  return Math.cos(halfAngle);
+}
+
+// `fireflyClamp` follows the native packer: omitted means the default, and 0, a negative value, NaN or a huge value mean no
+// clamp. A clamp of 0 would otherwise scale every indirect contribution to zero, and a negative one would make a sample negative.
+export function legacyFireflyClamp(value) {
+  if (value === undefined || value === null) {
+    return DEFAULT_FIREFLY_CLAMP;
+  }
+  if (typeof value !== 'number') {
+    throw new TypeError(`buildNativeInput: \`fireflyClamp\` must be a number, got ${JSON.stringify(value)}. Pass 0 for no clamp.`);
+  }
+  if (!(value > 0) || value >= NO_FIREFLY_CLAMP_THRESHOLD) {
+    return NO_FIREFLY_CLAMP;
+  }
+  return value;
+}
 
 // A thin lens rides in the unused fourth float of the four camera vectors: aperture radius (eye), focus distance (forward),
 // aperture blades (right) and aperture rotation in radians (above). The legacy kernel reads only xyz of those vectors, so it
@@ -32,11 +57,11 @@ function writeParameters(scene, camera, options, lightCount, atlasWidth, subsurf
   floats.set([...camera.above, 0], 12);
   writeThinLens(floats, camera);
   floats.set([...(sun?.direction ?? [0, 1, 0]), 0], 16);
-  floats.set([...(sun?.color ?? [0, 0, 0]), SUN_CONE_COSINE], 20);
+  floats.set([...(sun?.color ?? [0, 0, 0]), sunConeCosine(sun)], 20);
   floats.set([environment?.width ?? 1, environment?.height ?? 1, environment?.intensity ?? 1, environment?.total ?? 1], 24);
   floats.set([environment?.cosine ?? 1, environment?.sine ?? 0, scene.surfaceOffset, scene.farDistance], 28);
   // The fourth float is the noise threshold: pixels under it stop early, and 0 draws every sample.
-  floats.set([camera.halfWidth, camera.halfHeight, options.fireflyClamp ?? 20, options.noiseThreshold ?? 0], 32);
+  floats.set([camera.halfWidth, camera.halfHeight, legacyFireflyClamp(options.fireflyClamp),options.noiseThreshold ?? 0], 32);
   integers.set([options.width, options.height, options.bounces, lightCount], 36);
   integers.set([(sun ? 1 : 0) + lightCount + (environment ? 1 : 0), sun ? 1 : 0, environment ? 1 : 0, 0], 40);
   words.set([options.seed >>> 0, atlasWidth, 0, 0], 44);
