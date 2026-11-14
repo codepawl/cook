@@ -1,4 +1,4 @@
-//! Hardware ray traced stills for 67js (issue #626). The packed scene tables of the browser path tracer go in, the WGSL
+//! Hardware ray traced stills for Crucible (issue #626). The packed scene tables of the browser path tracer go in, the WGSL
 //! kernel runs on wgpu with ray queries (Vulkan), and the averaged linear colour comes back.
 
 mod cycles;

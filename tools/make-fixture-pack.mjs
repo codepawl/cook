@@ -1,5 +1,5 @@
 // Builds fixtures/room.cookpack: a small room (a floor, two boxes, one emissive panel and a sky colour) packed with
-// buildNativeInputV2 from an explicit { instances, materials } descriptor. No 67js code is involved, and the same run
+// buildNativeInputV2 from an explicit { instances, materials } descriptor. No Crucible code is involved, and the same run
 // always writes the same bytes.
 //
 // Usage: node tools/make-fixture-pack.mjs [output-file]   (default: fixtures/room.cookpack)
@@ -41,7 +41,7 @@ function normalize(vector) {
 /**
  * The camera object buildNativeInputV2 reads, for a fixed pinhole view. Fields: `eye` (position), `forward`, `right` and
  * `above` (unit axes of the view), `halfHeight` (tangent of half the vertical field of view) and `halfWidth` (the same
- * times the aspect ratio). The packer scales `right` and `above` by the half sizes itself. 67js computes the same fields
+ * times the aspect ratio). The packer scales `right` and `above` by the half sizes itself. Crucible computes the same fields
  * in `createCamera`; this copy has no thin lens and no lens shift.
  */
 export function pinholeCamera({ eye, target, fieldOfViewDegrees, width, height }) {

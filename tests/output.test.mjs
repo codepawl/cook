@@ -7,7 +7,7 @@ import { crc32, encodePng } from '../output/png.mjs';
 import { acesChannel, displayByte, toneMapToRgba8 } from '../output/tone-map.mjs';
 import { decodeNpy, decodePng } from './support/images.mjs';
 
-test('the tone curve gives the hand-computed ACES values and the gamma 2.2 bytes of the 67js default', () => {
+test('the tone curve gives the hand-computed ACES values and the gamma 2.2 bytes of the Crucible default', () => {
   assert.equal(acesChannel(0), 0);
   assert.equal(acesChannel(-3), 0);
   // (1 * (2.51 + 0.03)) / (1 * (2.43 + 0.59) + 0.14) = 2.54 / 3.16

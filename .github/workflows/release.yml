@@ -1,0 +1,80 @@
+name: Release
+
+# Builds the native addon for each system that `cook fetch-addon` covers (fetch-addon.mjs, PREBUILT_SYSTEMS).
+# A pull request that touches the build only builds and loads the addon. A pushed tag `v<version>` that equals the
+# version in package.json also attaches each addon and its .sha256 file to the GitHub release of that tag.
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - build.mjs
+      - build.rs
+      - Cargo.toml
+      - Cargo.lock
+      - fetch-addon.mjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  addon:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            system: win32-x64
+          # The oldest supported Ubuntu runner, so the addon links against an old glibc and loads on newer systems.
+          - os: ubuntu-22.04
+            system: linux-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: rustup toolchain install stable --profile minimal
+      - if: matrix.system == 'win32-x64'
+        run: rustup target add x86_64-pc-windows-msvc
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-cargo-${{ matrix.system }}-${{ hashFiles('Cargo.lock') }}
+      - name: Check that the tag names the package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          if [ "${GITHUB_REF_NAME}" != "v${package_version}" ]; then
+            echo "The tag ${GITHUB_REF_NAME} does not equal v${package_version} from package.json. Tag v${package_version}, or change the version first."
+            exit 1
+          fi
+      - run: node build.mjs
+      - name: Name the addon after its system and write its hash
+        run: |
+          mkdir -p dist
+          cp build/render-native.node "dist/render-native-${{ matrix.system }}.node"
+          (cd dist && sha256sum "render-native-${{ matrix.system }}.node" > "render-native-${{ matrix.system }}.node.sha256")
+          cat "dist/render-native-${{ matrix.system }}.node.sha256"
+      # Loading the addon needs no GPU: the Vulkan device opens only when a trace starts.
+      - name: Load the addon
+        run: node -e "require('./dist/render-native-${{ matrix.system }}.node'); console.log('loaded')"
+      - name: Attach the addon to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1 || gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --notes "Prebuilt native addons for Windows x64 and Linux x64. Install with npm install github:codepawl/cook#${GITHUB_REF_NAME}, then run npx cook fetch-addon." || true
+          gh release upload "${GITHUB_REF_NAME}" "dist/render-native-${{ matrix.system }}.node" "dist/render-native-${{ matrix.system }}.node.sha256" --clobber

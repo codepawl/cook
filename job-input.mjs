@@ -9,7 +9,7 @@ import { buildNativeInputV2, reduceV1MaterialTable, upgradeNativeInputV1ToV2, va
 
 const ALL_LIGHT_GROUPS = 0xffffffff;
 
-// Glossy iridescence defaults of glTF (KHR_materials_iridescence), which the 67js material layers follow.
+// Glossy iridescence defaults of glTF (KHR_materials_iridescence), which the Crucible material layers follow.
 const DEFAULT_IRIDESCENCE_IOR = 1.3;
 const DEFAULT_IRIDESCENCE_THICKNESS = 400;
 
@@ -37,7 +37,7 @@ function blendFields(material, resolved) {
 }
 
 // The kernel reads anisotropy as the Cycles Principled parameters: a strength from 0 to 1 that stretches the roughness, and the
-// rotation in turns. A 67js material (glTF KHR_materials_anisotropy) gives a strength that sets the tangent roughness and a
+// rotation in turns. A Crucible material (glTF KHR_materials_anisotropy) gives a strength that sets the tangent roughness and a
 // rotation in radians. This is the same conversion bench/cycles-parity/render-cycles.py applies for Blender, so the kernel
 // draws the lobe Cycles draws for the material.
 function cyclesAnisotropyFields(material, roughness) {
@@ -102,7 +102,7 @@ function sharesImage(firstDescriptor, secondDescriptor) {
 }
 
 // The kernel reads a coat's weight and roughness from the red and green channels of one map, and a sheen's tint and
-// roughness from the colour and alpha of one map. A 67js material (glTF) keeps each roughness in a map of its own. So the
+// roughness from the colour and alpha of one map. A Crucible material (glTF) keeps each roughness in a map of its own. So the
 // weight or tint map is carried only when its other channel cannot change the roughness: the roughness factor is 0, or the
 // material's roughness map is the same image.
 function coatMapFitsTheSlot(material, resolved) {

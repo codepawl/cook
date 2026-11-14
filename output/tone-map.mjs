@@ -1,12 +1,12 @@
-// The display transform the 67js path tracer applies by default (view transform "aces", then gamma 2.2), so a Cook PNG and a
-// 67js render of the same scene use the same curve. Copied from `acesChannel` in src/view-transform.js and
-// `toneMapToRgba8` in src/path-tracer.js of codepawl/67.js; a test pins the values.
+// The display transform the Crucible path tracer applies by default (view transform "aces", then gamma 2.2), so a Cook PNG and a
+// Crucible render of the same scene use the same curve. Copied from `acesChannel` in src/view-transform.js and
+// `toneMapToRgba8` in src/path-tracer.js of codepawl/crucible; a test pins the values.
 
 function clampUnit(value) {
   return Math.min(1, Math.max(0, value));
 }
 
-/** The rasterizer's ACES fit for one linear channel (src/view-transform.js `acesChannel` of codepawl/67.js). */
+/** The rasterizer's ACES fit for one linear channel (src/view-transform.js `acesChannel` of codepawl/crucible). */
 export function acesChannel(value) {
   // Infinity / Infinity would be NaN and a NaN byte is written as black: the brightest sample must stay white.
   if (value === Number.POSITIVE_INFINITY) return 1;

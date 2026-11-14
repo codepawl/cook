@@ -1,4 +1,4 @@
-// Packs a 67js trace scene (or upgrades a legacy v1 input) into the FORMAT-v2 binary tables read by the Cycles-parity
+// Packs a Crucible trace scene (or upgrades a legacy v1 input) into the FORMAT-v2 binary tables read by the Cycles-parity
 // native kernel (`FORMAT-v2.md` and `src/cycles/abi.wgsl`). Pure typed arrays with zero Node-only imports.
 
 import { buildLightTree } from './light-tree-v2.mjs';
@@ -2959,7 +2959,7 @@ function packFlattenedTraceScene(scene, rawParts, textureCollector) {
 }
 
 /**
- * Packs a 67js scene (from `buildTraceScene` or an explicit `{ instances, materials }` descriptor) and camera into
+ * Packs a Crucible scene (from `buildTraceScene` or an explicit `{ instances, materials }` descriptor) and camera into
  * `FORMAT-v2` typed-array buffers (`schemaVersion: 2`) matching `FORMAT-v2.md` and `src/cycles/abi.wgsl`.
  */
 export function buildNativeInputV2(scene, camera, options = {}) {
