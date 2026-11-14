@@ -1,26 +1,107 @@
 # Cook
 
+![The Classroom scene path traced by Cook: sunlight through tall windows falls across rows of wooden school desks](docs/media/classroom.jpg)
+
+<sub>Classroom by Christophe Seux (CC0, Blender demo files), rendered by Cook at 1280x720 and 512 samples in about 27 seconds on an NVIDIA A10G.</sub>
+
 Cook is a path tracer for the GPU. It traces a scene with hardware ray queries (Vulkan, through wgpu) and returns linear float images, plus the albedo, normal, depth and variance of the first hit. Its `cycles` kernel follows the light transport of Blender Cycles: the Principled BSDF, the light tree, Sobol-Burley sampling, the Cycles pixel filters. Measurements against Cycles are in the [Crucible parity notes](https://github.com/codepawl/crucible/blob/main/docs/cycles-parity.md).
 
 A scene reaches Cook as packed binary tables, the "FORMAT-v2" input ([FORMAT-v2.md](./FORMAT-v2.md)). The packers in this package build those tables, a `.cookpack` file stores them, and the command line renders such a file without any other code.
 
-## Requirements
+## Where it runs
 
-- Node 20.19 or newer.
-- To trace: a Vulkan adapter with ray query support, and the addon built from the Rust sources. The DX12 backend does not report ray queries, so the addon uses Vulkan only.
-- To build the addon: Rust (stable). On Windows build for MSVC; the default GNU toolchain crashes any wgpu 30 program. Cook has been built and run on Windows (MSVC) and Linux.
+| Machine | Render with the GPU | Pack and read scenes |
+| :--- | :---: | :---: |
+| Windows 10 or 11, x64 | yes | yes |
+| Linux, x64 (desktop or cloud GPU) | yes | yes |
+| macOS | no | yes |
+| Browser page | no | yes |
 
-Reading, writing and packing scenes is JavaScript only and needs neither Rust nor a GPU.
+To render, the GPU must support Vulkan ray queries (`VK_KHR_ray_query`). NVIDIA RTX, AMD Radeon RX 6000 and Intel Arc cards and newer report it. Cook was measured on NVIDIA cards only: RTX 3060, RTX 4090 and A10G. The DX12 and Metal backends do not give Cook ray queries, so it uses Vulkan only.
 
-## Install and build
+Packing and reading scenes is JavaScript only. The packers and `pack-file.mjs` import nothing from Node, so a browser page can run them.
 
-```sh
-npm install github:codepawl/cook
-cd node_modules/@codepawlhq/cook
-npm run build   # cargo build --release, copies build/render-native.node
-```
+## Install
 
-Installing runs no script and compiles nothing. Building takes the Rust crates listed in `Cargo.lock` from crates.io. From a clone, `npm run build` in the clone does the same. `COOK_ADDON_PATH` names an addon built somewhere else; a path set there that does not exist is an error.
+You need Node 20.19 or newer, Rust (stable) and the driver of your GPU. The steps build the native addon once, which takes a few minutes.
+
+### Windows
+
+1. Install Node, Rust and the C++ build tools:
+
+   ```powershell
+   winget install OpenJS.NodeJS.LTS Rustlang.Rustup
+   winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive"
+   ```
+
+2. Open a new terminal, so that `node` and `cargo` are on the `PATH`.
+3. Add the MSVC target. The GNU toolchain crashes every wgpu 30 program.
+
+   ```powershell
+   rustup target add x86_64-pc-windows-msvc
+   ```
+
+4. Do the [common steps](#common-steps).
+
+### Linux
+
+1. Install Node 20.19 or newer from [nodejs.org](https://nodejs.org) or with `nvm`. The `nodejs` package of older distributions is too old.
+2. Install Rust:
+
+   ```sh
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   ```
+
+3. Install the Vulkan loader and a C compiler. On Debian or Ubuntu:
+
+   ```sh
+   sudo apt install libvulkan1 build-essential
+   ```
+
+4. If the GPU is from AMD or Intel, install its Vulkan driver too: `sudo apt install mesa-vulkan-drivers`. The NVIDIA driver includes its Vulkan driver.
+5. Do the [common steps](#common-steps).
+
+### Common steps
+
+1. Install Cook from GitHub:
+
+   ```sh
+   npm install github:codepawl/cook
+   ```
+
+2. Build the native addon. It prints `Built build/render-native.node`.
+
+   ```sh
+   npm --prefix node_modules/@codepawlhq/cook run build
+   ```
+
+3. Render the test room. It writes `room.png`.
+
+   ```sh
+   npx cook render node_modules/@codepawlhq/cook/fixtures/room.cookpack --output room.png
+   ```
+
+Installing runs no script. Building takes the Rust crates listed in `Cargo.lock` from crates.io. From a clone of this repository, run `npm run build` in the clone. `COOK_ADDON_PATH` names an addon built somewhere else. If that path does not exist, Cook stops with an error.
+
+### If the render fails
+
+| Message | Cause and fix |
+| :--- | :--- |
+| `No Vulkan adapter` | The Vulkan loader or the GPU driver is missing. Install the driver of your GPU and, on Linux, `libvulkan1`. |
+| `The Vulkan adapter does not support ray queries.` | The GPU is too old, or only a software adapter (llvmpipe) is visible. See the cloud note below. |
+| Exit code 5 | The addon is not built or does not load. Do step 2 of the common steps again. |
+
+On a rented Linux GPU box, the host sometimes gives the container only the compute libraries of the NVIDIA driver. Then `vulkaninfo --summary` lists only `llvmpipe`. Copy the graphics libraries of the same driver version (`libEGL_nvidia`, `libGLX_nvidia`, `libnvidia-glcore`, `libnvidia-eglcore`, `libnvidia-glsi`, `libnvidia-tls`, `libnvidia-glvkspirv`, `libnvidia-rtcore`, `libnvidia-gpucomp`) into `/usr/lib/x86_64-linux-gnu`, and point `/etc/vulkan/icd.d/nvidia_icd.json` at `libEGL_nvidia.so.0`. Then `vulkaninfo | grep VK_KHR_ray_query` finds the extension.
+
+## Use Cook from an app
+
+| App | How |
+| :--- | :--- |
+| Terminal | `npx cook render <scene.cookpack> --output <file.png>`, see [Command line](#command-line). |
+| Node.js | `import { traceNative } from '@codepawlhq/cook'`, see [JavaScript](#javascript). |
+| [Crucible](https://github.com/codepawl/crucible) | Crucible builds its scenes with the packers of this package and renders them with Cook. It pins one commit of this repository. |
+| Blender 4.2 or newer | The add-on in Crucible adds Cook to the Render Engine list. Setup: [docs/blender-addon.md](https://github.com/codepawl/crucible/blob/main/docs/blender-addon.md) in the Crucible repository. |
+| Browser page | Import `@codepawlhq/cook/pack-input-v2` and `@codepawlhq/cook/pack-file` to build and save `.cookpack` files. Render them on a machine with the addon. |
 
 ## Command line
 
@@ -57,10 +138,6 @@ console.log(describeEngine().packFormat, adapter, tracedSeconds); // rgba: linea
 A `.cookpack` file holds the tables of one FORMAT-v2 input in a little-endian container: a header, a directory of named tables, a JSON metadata block (counts, pack revision) and the tables, 8-byte aligned. `encodePackFile(input)` and `decodePackFile(bytes)` in `@codepawlhq/cook/pack-file` write and read it with no Node imports; every read is bounds checked and a damaged file is refused with an error that says what is wrong. The layout is section 10 of [FORMAT-v2.md](./FORMAT-v2.md). Treat pack files from others as untrusted input ([SECURITY.md](./SECURITY.md)).
 
 The input itself comes from `buildNativeInputV2(scene, camera, options)` (`@codepawlhq/cook/pack-input-v2`), which takes either a Crucible trace scene or an explicit `{ instances, materials }` descriptor, as `tools/make-fixture-pack.mjs` does. `PACK_REVISION` counts the changes that make an older input render differently; a pack file of a revision the engine does not read is refused.
-
-## Crucible and the Blender add-on
-
-[Crucible](https://github.com/codepawl/crucible) packs its scenes with these packers and traces them through this package; it depends on one pinned commit of this repository. The Blender add-on in the Crucible repository drives Cook through a Crucible script and needs the addon built here, which it finds through `COOK_ADDON_PATH` or the installed package once the Crucible side of this split (Crucible issue #898) has landed.
 
 ## Licence
 
