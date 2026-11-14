@@ -2390,6 +2390,24 @@ function resolveSurfaceOffset(surfaceOffset, rayEpsilon) {
   return value;
 }
 
+/**
+ * The fog albedo as three floats in [0, 1], the range of a single-scatter albedo. The kernel multiplies the path throughput by it
+ * at every scatter, so a value above 1 would add energy and a NaN would poison the pixel. A missing, short, non-numeric or
+ * non-finite component throws; a finite one outside [0, 1] is clamped. Math.max keeps NaN, so finiteness is checked first.
+ */
+export function resolveVolumeAlbedo(albedo, callerName) {
+  const source = albedo ?? [1, 1, 1];
+  const resolved = [];
+  for (let channel = 0; channel < 3; channel += 1) {
+    const component = source[channel];
+    if (typeof component !== 'number' || !Number.isFinite(component)) {
+      throw new RangeError(`${callerName}: \`volume.albedo\` needs three finite numbers [r, g, b] in [0, 1]; component ${channel} is ${component === undefined ? 'missing' : JSON.stringify(component)}.`);
+    }
+    resolved.push(Math.min(1, Math.max(0, component)));
+  }
+  return resolved;
+}
+
 function packKernelParamsV2({
   camera,
   options,
@@ -2513,7 +2531,7 @@ function packKernelParamsV2({
 
   const volMin = volume?.minimum ?? [0, 0, 0];
   const volMax = volume?.maximum ?? [0, 0, 0];
-  const volAlbedo = volume?.albedo ?? [1, 1, 1];
+  const volAlbedo = resolveVolumeAlbedo(volume?.albedo, 'packKernelParamsV2');
   f32[56] = Number(volMin[0]);
   f32[57] = Number(volMin[1]);
   f32[58] = Number(volMin[2]);
@@ -2524,9 +2542,9 @@ function packKernelParamsV2({
   f32[62] = Number(volMax[2]);
   f32[63] = Math.max(-0.99, Math.min(0.99, Number(volume?.anisotropy ?? 0)));
 
-  f32[64] = Number(volAlbedo[0]);
-  f32[65] = Number(volAlbedo[1]);
-  f32[66] = Number(volAlbedo[2]);
+  f32[64] = volAlbedo[0];
+  f32[65] = volAlbedo[1];
+  f32[66] = volAlbedo[2];
   f32[67] = emissiveTotalWeight;
 
   f32[68] = analyticLightTotalWeight;
