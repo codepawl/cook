@@ -170,7 +170,7 @@ pub(crate) fn check_counts_match_kernel_params(input: &NativeTraceInputV2) -> Re
     for (name, input_count, byte_offset) in counts {
         if kernel_params.len() < byte_offset + 4 {
             return Err(failure(format!(
-                "kernelParams holds {} bytes, too few to read {name} at byte {byte_offset}. Pass the 320 byte KernelParamsV2 block.",
+                "kernelParams holds {} bytes, too few to read {name} at byte {byte_offset}. Pass the 336 byte KernelParamsV2 block.",
                 kernel_params.len()
             )));
         }
@@ -215,7 +215,7 @@ pub(crate) fn check_frame_params_keep_scene_counts(session_kernel_params: &[u8],
     for (name, byte_offset) in SCENE_BOUND_FIELDS {
         if session_kernel_params.len() < byte_offset + 4 || frame_kernel_params.len() < byte_offset + 4 {
             return Err(failure(format!(
-                "kernelParams must hold the 320 byte KernelParamsV2 block to read {name} at byte {byte_offset}."
+                "kernelParams must hold the 336 byte KernelParamsV2 block to read {name} at byte {byte_offset}."
             )));
         }
         let session_word = read_u32_le(session_kernel_params, byte_offset);
@@ -242,7 +242,7 @@ pub(crate) fn check_update_params_keep_scene_shape(session_kernel_params: &[u8],
         }
         if session_kernel_params.len() < byte_offset + 4 || update_kernel_params.len() < byte_offset + 4 {
             return Err(failure(format!(
-                "kernelParams must hold the 320 byte KernelParamsV2 block to read {name} at byte {byte_offset}."
+                "kernelParams must hold the 336 byte KernelParamsV2 block to read {name} at byte {byte_offset}."
             )));
         }
         let session_word = read_u32_le(session_kernel_params, byte_offset);
@@ -609,7 +609,7 @@ mod specialization_tests {
     }
 
     fn make_kp(kernel_flags: u32, volume_density: f32, env_width: u32, env_height: u32, env_total_weight: f32) -> Vec<u8> {
-        let mut kp = vec![0u8; 320];
+        let mut kp = vec![0u8; 336];
         // magic & version at bytes 0-7
         kp[0..4].copy_from_slice(&0x36375054u32.to_le_bytes());
         kp[4..8].copy_from_slice(&2u32.to_le_bytes());
@@ -1234,7 +1234,7 @@ fn ").unwrap_or(sample_body.len());
         let lights = make_default_light();
         let input = dummy_input(&[0u8; 16], &mat, &lights, &inst);
         let message = check_counts_match_kernel_params(&input).unwrap_err().reason;
-        assert!(message.contains("320"), "{message}");
+        assert!(message.contains("336"), "{message}");
     }
 
     fn set_portal_count(kernel_params: &mut [u8], portal_count: u32) {
