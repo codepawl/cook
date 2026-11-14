@@ -33,6 +33,7 @@ import {
   validateDenoiseOption,
   validateSeedOption,
   packCameraParams,
+  requireHeldCameraMatchesImageSize,
 } from './pack-input-v2.mjs';
 
 export { buildNativeInput, buildNativeTexelInput } from './pack-input.mjs';
@@ -129,6 +130,7 @@ export function traceNative(input, options = {}) {
     return withTimeLimitCode(() => addon.traceScene(input, { width, height, samples, maxSeconds, kernel: selectedKernel }));
   }
   const v2Input = prepareCyclesInput(input, options);
+  requireHeldCameraMatchesImageSize(v2Input.kernelParams, width, height, 'traceNative');
   return withTimeLimitCode(() => addon.traceSceneCycles(v2Input, {
     width,
     height,
@@ -458,7 +460,11 @@ export function resolveSessionCreation(input, options, callerName = 'createNativ
   }
   requireCyclesKernelOption(options.kernel, callerName);
   validatePackOptions(options, callerName);
-  return { ...input, kernelParams: patchedCyclesKernelParams(input, input.kernelParams, options, callerName) };
+  const kernelParams = patchedCyclesKernelParams(input, input.kernelParams, options, callerName);
+  if (options.width !== undefined && options.height !== undefined) {
+    requireHeldCameraMatchesImageSize(kernelParams, options.width, options.height, callerName);
+  }
+  return { ...input, kernelParams };
 }
 
 // Exported for tests; not part of the public API.
@@ -478,6 +484,7 @@ export function resolveSessionFrame(sessionInput, sessionOptions, renderOptions)
   baseKernelParams = withFrameCameraAndSeed(baseKernelParams, renderOptions.camera, renderOptions.seed, options);
   const kernelParams = patchedCyclesKernelParams(sessionInput, baseKernelParams, options, 'NativeSession.render');
   const { width, height, samples, samplesPerDispatch, dispatchBudgetMs, maxSeconds, bootstrapKernel, denoise, accumulate, targetSamples } = options;
+  requireHeldCameraMatchesImageSize(kernelParams, width, height, 'NativeSession.render');
   validateProgressiveOptions({ accumulate, targetSamples, samples });
   return { width, height, samples, samplesPerDispatch, dispatchBudgetMs, maxSeconds, bootstrapKernel, denoise, kernelParams, accumulate, targetSamples };
 }

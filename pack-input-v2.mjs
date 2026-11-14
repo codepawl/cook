@@ -335,7 +335,7 @@ function joinMipLevels(levelZeroWords, mipChain) {
  * that is filtered linearly and has more than one texel; a texture can say `mips: true` or `mips: false` to differ from that.
  * The default is level 0 only, which is what Blender Cycles reads.
  */
-function createTextureCollector({ textureMips, texturePoolMaxBytes } = {}) {
+export function createTextureCollector({ textureMips, texturePoolMaxBytes } = {}) {
   validateTextureMipsOption(textureMips, 'textureMips', 'createTextureCollector');
   const poolMaxBytes = validateTexturePoolMaxBytes(texturePoolMaxBytes, 'createTextureCollector');
   const indexByKey = new Map();
@@ -1712,6 +1712,25 @@ function resolveCameraEnvScale(cameraIntensity, intensity) {
   return intensity > 0 ? cameraIntensity / intensity : -cameraIntensity;
 }
 
+const LARGEST_FINITE_FLOAT32 = 3.4028234663852886e38;
+
+function requireEnvironmentData(source, width, height, channels) {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+    throw new RangeError(`environment.width and environment.height must be positive whole numbers, got ${width} x ${height}. Pass the pixel size of the map.`);
+  }
+  const expectedLength = width * height * channels;
+  if (!source || !(source.length >= expectedLength)) {
+    throw new RangeError(`environment.data has ${source?.length ?? 0} values, but a ${width} x ${height} map with ${channels} channels needs ${expectedLength}. Pass width * height * channels numbers, or fix width, height and channels.`);
+  }
+}
+
+/** A texel channel safe to weigh: NaN and negatives become 0, an infinity or huge value becomes `limit`. */
+function sanitizeEnvironmentChannel(value, limit) {
+  const number = Number(value);
+  if (Number.isNaN(number) || number < 0) return 0;
+  return Math.min(limit, number);
+}
+
 function packEnvironmentTexelsV2(environment, options = {}) {
   if (!environment || !(environment.width > 0 && environment.height > 0)) {
     const bg = options.backgroundColor ?? [0, 0, 0];
@@ -1731,12 +1750,16 @@ function packEnvironmentTexelsV2(environment, options = {}) {
   const height = Math.round(environment.height);
   const channels = Math.max(3, Math.round(environment.channels ?? 3));
   const source = environment.data;
+  requireEnvironmentData(source, width, height, channels);
   const intensity = Number(environment.intensity ?? 1);
   const radianceLimit = resolveHdriRadianceLimit(options.hdriRadianceLimit, 'buildNativeInputV2');
   const envRotation = environment.rotation !== undefined
     ? Number(environment.rotation)
     : Math.atan2(Number(environment.sine ?? 0), Number(environment.cosine ?? 1));
 
+  // The weights sum in float64, so the largest texel times the intensity and the solid angle must stay finite.
+  const weightScale = Math.max(1e-30, Math.abs(intensity) * 2 * Math.PI * Math.PI);
+  const channelLimit = Math.min(radianceLimit, LARGEST_FINITE_FLOAT32, 1e300 / weightScale / (width * height));
   const compensationFraction = resolveEnvCompensationFraction(options.envCompensation, 'buildNativeInputV2');
   const pixelCount = width * height;
   const totalVec4 = 2 * pixelCount + height;
@@ -1753,9 +1776,9 @@ function packEnvironmentTexelsV2(environment, options = {}) {
     for (let x = 0; x < width; x++) {
       const pixelIndex = y * width + x;
       const srcBase = pixelIndex * channels;
-      const r = Math.min(radianceLimit, Math.max(0, Number(source[srcBase])));
-      const g = Math.min(radianceLimit, Math.max(0, Number(source[srcBase + 1])));
-      const b = Math.min(radianceLimit, Math.max(0, Number(source[srcBase + 2])));
+      const r = sanitizeEnvironmentChannel(source[srcBase], channelLimit);
+      const g = sanitizeEnvironmentChannel(source[srcBase + 1], channelLimit);
+      const b = sanitizeEnvironmentChannel(source[srcBase + 2], channelLimit);
       const dstBase = pixelIndex * 4;
       texels[dstBase] = r;
       texels[dstBase + 1] = g;
@@ -1984,6 +2007,13 @@ export function resolveUseLightTree(lightSampling, emitterCount, lightTreeNodeCo
   return emitterCount > LIGHT_TREE_AUTO_MIN_EMITTERS;
 }
 
+function requireFiniteNumberOption(value, name, callerName, isAccepted, expectation) {
+  if (value === undefined) return;
+  if (typeof value !== 'number' || !Number.isFinite(value) || !isAccepted(value)) {
+    throw new RangeError(`${callerName}: \`${name}\` must be a finite number ${expectation}, got ${JSON.stringify(value)}.`);
+  }
+}
+
 export function validatePackOptions(options, callerName, requireDimensionsAndSamples = false) {
   if (!options || typeof options !== 'object') {
     throw new TypeError(`${callerName}: \`options\` must be an object.`);
@@ -2007,6 +2037,12 @@ export function validatePackOptions(options, callerName, requireDimensionsAndSam
   validateDenoiseOption(options.denoise, callerName);
   validateTextureMipsOption(options.textureMips, 'textureMips', callerName);
   validateFilterOptions(options, callerName);
+  validateSeedOption(options.seed, callerName);
+  requireFiniteNumberOption(options.exposure, 'exposure', callerName, value => value > 0, 'greater than 0');
+  requireFiniteNumberOption(options.rayEpsilon, 'rayEpsilon', callerName, value => value > 0, 'greater than 0');
+  requireFiniteNumberOption(options.noiseThreshold, 'noiseThreshold', callerName, value => value >= 0, '0 or more');
+  requireFiniteNumberOption(options.adaptiveThreshold, 'adaptiveThreshold', callerName, value => value >= 0, '0 or more');
+  requireFiniteNumberOption(options.filterGlossy, 'filterGlossy', callerName, value => value >= 0, '0 or more (0 is a sharp glossy filter)');
   if (width !== undefined && height !== undefined) {
     validateImagePixelCount(width, height, callerName);
     if (samplesPerDispatch !== undefined) {
@@ -2204,6 +2240,8 @@ const KERNEL_PARAMS_V2_CAMERA_FAR_BYTE_OFFSET = 140;
 const KERNEL_PARAMS_V2_CAMERA_BYTE_LENGTH = 80;
 const MAX_SEED = 0xffffffff;
 const ASPECT_RELATIVE_TOLERANCE = 1e-3;
+// Half a pixel, plus the float32 rounding of the camera words, so the exact half-pixel case of a rounded size passes.
+const HALF_PIXEL_TOLERANCE = 0.5 + 1e-4;
 
 // The camera fields a block holds, which a camera-only update keeps for every field the caller leaves out.
 function readHeldCameraWords(view) {
@@ -2248,11 +2286,29 @@ export function validateSeedOption(seed, callerName) {
 function requireCameraMatchesAspect(cameraWords, width, height, callerName) {
   const cameraAspect = Math.hypot(...cameraWords.scaledRight) / Math.hypot(...cameraWords.scaledUp);
   const imageAspect = width / height;
-  if (!Number.isFinite(cameraAspect) || Math.abs(cameraAspect - imageAspect) > ASPECT_RELATIVE_TOLERANCE * imageAspect) {
+  const withinRelativeTolerance = Math.abs(cameraAspect - imageAspect) <= ASPECT_RELATIVE_TOLERANCE * imageAspect;
+  // A size derived from the camera's ratio by rounding the missing side is off by at most half a pixel on that side.
+  const withinHalfPixelOfWidth = Math.abs(width - height * cameraAspect) <= HALF_PIXEL_TOLERANCE;
+  const withinHalfPixelOfHeight = Math.abs(height - width / cameraAspect) <= HALF_PIXEL_TOLERANCE;
+  const matches = withinRelativeTolerance || withinHalfPixelOfWidth || withinHalfPixelOfHeight;
+  if (!Number.isFinite(cameraAspect) || !matches) {
     throw new RangeError(
       `${callerName}: the camera has a width to height ratio of ${cameraAspect} but the image is ${width}x${height} (${imageAspect}). Build the camera with createCamera(view, ${width}, ${height}) for this image size, or pass \`width\` and \`height\` of the frame.`
     );
   }
+}
+
+/**
+ * Throws unless the camera held in a FORMAT-v2 `kernelParams` block has the aspect ratio of `width` x `height`, so an image of
+ * another shape is not rendered squashed.
+ */
+export function requireHeldCameraMatchesImageSize(kernelParams, width, height, callerName) {
+  requireKernelParamsV2Block(kernelParams, callerName);
+  const view = new DataView(kernelParams.buffer, kernelParams.byteOffset, kernelParams.byteLength);
+  const wordAt = wordIndex => view.getFloat32(wordIndex * 4, true);
+  const scaledRight = [wordAt(36), wordAt(37), wordAt(38)];
+  const scaledUp = [wordAt(40), wordAt(41), wordAt(42)];
+  requireCameraMatchesAspect({ scaledRight, scaledUp }, width, height, callerName);
 }
 
 /**
@@ -2306,6 +2362,13 @@ export function packCameraParams(kernelParams, camera, options = {}) {
     view.setUint32(KERNEL_PARAMS_V2_SEED_BYTE_OFFSET, options.seed, true);
   }
   return patchedParams;
+}
+
+function resolveSurfaceOffset(surfaceOffset, rayEpsilon) {
+  const value = surfaceOffset ?? rayEpsilon ?? 1e-4;
+  const name = surfaceOffset === undefined ? 'rayEpsilon' : 'scene.surfaceOffset';
+  requireFiniteNumberOption(value, name, 'buildNativeInputV2', number => number > 0, 'greater than 0');
+  return value;
 }
 
 function packKernelParamsV2({
@@ -2695,6 +2758,54 @@ function materialRecordsAreEqual(first, second) {
   return true;
 }
 
+function requireWholeIndexInRange(value, upperBound, label, what) {
+  if (!Number.isInteger(value) || value < 0 || value >= upperBound) {
+    throw new RangeError(`${label}: ${what} must be a whole number from 0 to ${upperBound - 1}, got ${JSON.stringify(value)}. Pass an index inside the table it points into.`);
+  }
+}
+
+function requireVertexAttribute(attribute, name, valuesPerVertex, vertexCount, label) {
+  if (attribute === undefined || attribute === null) return;
+  const expectedLength = vertexCount * valuesPerVertex;
+  if (attribute.length !== expectedLength) {
+    throw new RangeError(`${label}: \`${name}\` has ${attribute.length} values, but ${vertexCount} vertices need ${expectedLength} (${valuesPerVertex} per vertex). Pass one entry per vertex, or leave \`${name}\` out.`);
+  }
+  for (let valueIndex = 0; valueIndex < expectedLength; valueIndex++) {
+    if (!Number.isFinite(attribute[valueIndex])) {
+      throw new RangeError(`${label}: \`${name}\` value ${valueIndex} (vertex ${Math.floor(valueIndex / valuesPerVertex)}) is ${attribute[valueIndex]}. Pass finite numbers.`);
+    }
+  }
+}
+
+/** Checks one geometry once, before its triangles are packed. Throws a RangeError that names the geometry, the triangle and the value. */
+function validateGeometryForPacking(geometry, label, rawMaterialCount) {
+  const { positions, indices, triangleMaterial } = geometry;
+  if (positions.length % 3 !== 0) {
+    throw new RangeError(`${label}: \`positions\` has ${positions.length} values, which is not a multiple of 3. Pass x, y, z for each vertex.`);
+  }
+  if (indices.length % 3 !== 0) {
+    throw new RangeError(`${label}: \`indices\` has ${indices.length} values, which is not a multiple of 3. Pass three vertex indices for each triangle.`);
+  }
+  const vertexCount = positions.length / 3;
+  requireVertexAttribute(positions, 'positions', 3, vertexCount, label);
+  requireVertexAttribute(geometry.normals, 'normals', 3, vertexCount, label);
+  requireVertexAttribute(geometry.uvs, 'uvs', 2, vertexCount, label);
+  requireVertexAttribute(geometry.colors, 'colors', 3, vertexCount, label);
+  requireVertexAttribute(geometry.tangents, 'tangents', 4, vertexCount, label);
+  for (let indexPosition = 0; indexPosition < indices.length; indexPosition++) {
+    requireWholeIndexInRange(indices[indexPosition], vertexCount, `${label}, triangle ${Math.floor(indexPosition / 3)}`, `vertex index ${indexPosition % 3}`);
+  }
+  if (triangleMaterial) {
+    const triangleCount = indices.length / 3;
+    if (triangleMaterial.length < triangleCount) {
+      throw new RangeError(`${label}: \`triangleMaterial\` has ${triangleMaterial.length} entries for ${triangleCount} triangles. Pass one material index per triangle.`);
+    }
+    for (let triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++) {
+      requireWholeIndexInRange(triangleMaterial[triangleIndex], rawMaterialCount, `${label}, triangle ${triangleIndex}`, 'material index');
+    }
+  }
+}
+
 function packInstancedGeometry(instancesInput, rawMaterials, textureCollector, reducedMaterials) {
   const partRecords = reducedMaterials
     ? reducedMaterials.materialRecords
@@ -2734,13 +2845,20 @@ function packInstancedGeometry(instancesInput, rawMaterials, textureCollector, r
     if (!geometry?.positions || !geometry?.indices) {
       throw new TypeError(`Instance[${instIdx}] requires a geometry with positions and indices.`);
     }
+    const instanceLabel = `Instance[${instIdx}]`;
+    requireWholeIndexInRange(inst.materialIndex ?? 0, partRecords.length, instanceLabel, '`materialIndex`');
+    const overridesMaterial = inst.materialOverride !== undefined && inst.materialOverride !== INVALID_INDEX_V2;
+    if (overridesMaterial) {
+      requireWholeIndexInRange(inst.materialOverride, partRecords.length, instanceLabel, '`materialOverride`');
+    }
     const defaultMaterialIndex = recordIndexOf(Number(inst.materialIndex ?? 0));
-    let materialOverride = inst.materialOverride !== undefined
+    let materialOverride = overridesMaterial
       ? recordIndexOf(inst.materialOverride >>> 0)
       : (inst.overrideMaterial === true ? (defaultMaterialIndex >>> 0) : INVALID_INDEX_V2);
 
     let meshSlot = meshCache.get(geometry);
     if (!meshSlot) {
+      validateGeometryForPacking(geometry, `${instanceLabel} geometry`, partRecords.length);
       const blasIndex = meshCache.size;
       const triCount = Math.floor(geometry.indices.length / 3);
       const forceNonOpaque = forceNonOpaqueGeometries.has(geometry);
@@ -3019,7 +3137,7 @@ export function buildNativeInputV2(scene, camera, options = {}) {
     usesSubsurface: packedGeometry.usesSubsurface,
     emissiveTotalWeight: packedEmissives.emissiveTotalWeight,
     analyticLightTotalWeight: packedLights.analyticLightTotalWeight,
-    rayEpsilon: Number(scene.surfaceOffset ?? options.rayEpsilon ?? 1e-4),
+    rayEpsilon: resolveSurfaceOffset(scene.surfaceOffset, options.rayEpsilon),
     farDistance: Number(scene.farDistance ?? 1e30),
   });
 

@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // The Cook command line: render a pack file to a picture, or describe one. Loads only this package and Node built-ins.
-import { readFileSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, extname } from 'node:path';
+import { readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, extname, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 
 import { describeEngine, isTimeLimitError } from '../engine.mjs';
 import { COOK_PACK_REVISION_CODE, loadNativeAddon, traceNative } from '../index.mjs';
 import { PackFileError, decodePackFile, describePackFile } from '../pack-file.mjs';
 import { validatePackOptions } from '../pack-input-v2.mjs';
-import { fetchPrebuiltAddon } from '../fetch-addon.mjs';
+import { describeAddonOverrideWarning, fetchPrebuiltAddon } from '../fetch-addon.mjs';
 import { encodeNpy } from '../output/npy.mjs';
 import { encodePng } from '../output/png.mjs';
 import { toneMapToRgba8 } from '../output/tone-map.mjs';
@@ -27,10 +27,10 @@ const HELP_TEXT = `Usage:
   cook render <scene.cookpack> --output <file.png|file.npy> [options]
   cook info <scene.cookpack>
   cook fetch-addon
-  cook --help | --version
+  cook --help | -h | --version | -v
 
 render options:
-  --output <file>          where to write: .png (8-bit, ACES curve and gamma 2.2) or .npy (linear float32 RGBA, shape height x width x 4)
+  --output, -o <file>      where to write: .png (8-bit, ACES curve and gamma 2.2) or .npy (linear float32 RGBA, shape height x width x 4)
   --width <n>, --height <n>  image size; the packed aspect ratio is kept, so give one of them or both at that ratio
   --samples <n>            samples per pixel (default: the number stored in the pack)
   --max-seconds <s>        stop with exit code 4 and write nothing once the trace has run this long
@@ -44,7 +44,7 @@ The scene is always rendered with the cycles kernel. The seed, camera and bounce
 Environment: COOK_ADDON_PATH names a built render-native.node elsewhere.
 
 Exit codes: 0 done, 1 the render failed, 2 wrong arguments, 3 the pack file is unreadable, damaged or of a revision this
-Cook does not read, 4 the time limit passed, 5 the native addon is not built, cannot be loaded or cannot be downloaded (cook fetch-addon, or npm run build).
+Cook does not read (too new or too old), 4 the time limit passed, 5 the native addon is not built, cannot be loaded or cannot be downloaded (cook fetch-addon, or npm run build).
 A render that fails on the card (for example no Vulkan adapter with ray queries) exits 1 with the addon's message.
 `;
 
@@ -84,6 +84,37 @@ function requireWritableOutputFolder(outputPath) {
   if (!isFolder) {
     throw new UsageError(`--output ${JSON.stringify(outputPath)}: the folder ${JSON.stringify(folder)} does not exist. Create it or give another path.`);
   }
+  let outputIsDirectory = false;
+  try {
+    outputIsDirectory = statSync(outputPath).isDirectory();
+  } catch {
+    outputIsDirectory = false;
+  }
+  if (outputIsDirectory) {
+    throw new UsageError(`--output ${JSON.stringify(outputPath)} is a folder. Give a file name ending in .png or .npy.`);
+  }
+}
+
+// Unique per process, so two renders to the same output do not share a partial file.
+function partialPathOf(outputPath) {
+  return `${outputPath}.${process.pid}.partial`;
+}
+
+// Creates the partial file before the trace, so an unwritable folder fails now and not after minutes of rendering. It never
+// replaces a file that is already there.
+function reservePartialOutput(outputPath) {
+  try {
+    writeFileSync(partialPathOf(outputPath), '', { flag: 'wx' });
+  } catch (writeError) {
+    if (writeError.code === 'EEXIST') {
+      throw new UsageError(`--output ${JSON.stringify(outputPath)}: ${JSON.stringify(partialPathOf(outputPath))} already exists. Remove it, or give another output path.`);
+    }
+    throw new UsageError(`--output ${JSON.stringify(outputPath)}: cannot create ${JSON.stringify(partialPathOf(outputPath))}: ${writeError.message}. Give a path in a writable folder.`);
+  }
+}
+
+function discardPartialOutput(outputPath) {
+  rmSync(partialPathOf(outputPath), { force: true });
 }
 
 function parseRenderOptions(values) {
@@ -182,9 +213,30 @@ function writePicture(options, pixels, width, height) {
     ? encodePng(toneMapToRgba8(pixels, width, height), width, height)
     : encodeNpy(pixels, width, height);
   try {
-    writeFileSync(options.outputPath, bytes);
+    writeFileSync(partialPathOf(options.outputPath), bytes);
+    renameSync(partialPathOf(options.outputPath), options.outputPath);
   } catch (writeError) {
+    discardPartialOutput(options.outputPath);
     throw new CliFailure(`cannot write ${JSON.stringify(options.outputPath)}: ${writeError.message}`, EXIT_RENDER_FAILED);
+  }
+}
+
+// A value the user passed as a flag is a usage error; a value stored in the pack is a bad pack.
+function requireValidTraceOptions(traceOptions, options, description, scenePath) {
+  try {
+    validatePackOptions(traceOptions, 'cook render', true);
+  } catch (rangeError) {
+    const storedFields = [];
+    if (options.samples === undefined) storedFields.push('samples');
+    if (options.width === undefined && options.height === undefined) storedFields.push('width', 'height');
+    const blamedField = storedFields.find((field) => rangeError.message.includes(`\`${field}\``));
+    if (blamedField === undefined) throw new UsageError(rangeError.message);
+    const storedValue = blamedField === 'samples' ? description.image.samples : description.image[blamedField];
+    const overrideFlag = blamedField === 'samples' ? '--samples' : '--width and --height';
+    throw new CliFailure(
+      `${scenePath}: the pack stores ${blamedField} ${storedValue}, which is out of range (${rangeError.message}). Pass ${overrideFlag} to override, or pack the scene again.`,
+      EXIT_BAD_PACK
+    );
   }
 }
 
@@ -206,24 +258,26 @@ function runRender(positionals, values) {
     maxSeconds: options.maxSeconds,
     denoise: options.denoise,
   };
-  try {
-    validatePackOptions(traceOptions, 'cook render', true);
-  } catch (rangeError) {
-    throw new UsageError(rangeError.message);
-  }
+  requireValidTraceOptions(traceOptions, options, description, scenePath);
   const input = decodePackFileForCli(bytes, scenePath);
   requireAddon();
+  reservePartialOutput(options.outputPath);
 
   let result;
   try {
     result = traceNative(input, traceOptions);
   } catch (traceError) {
+    discardPartialOutput(options.outputPath);
     if (isTimeLimitError(traceError)) {
       throw new CliFailure(`the trace passed its time limit of ${options.maxSeconds} s; nothing was written. Raise --max-seconds or lower --samples.`, EXIT_TIME_LIMIT);
     }
     throw new CliFailure(`the render failed: ${traceError.message}`, EXIT_RENDER_FAILED);
   }
-  writePicture(options, result.denoisedRgba ?? result.rgba, width, height);
+  try {
+    writePicture(options, result.denoisedRgba ?? result.rgba, width, height);
+  } finally {
+    discardPartialOutput(options.outputPath);
+  }
   console.log(`rendered ${width} x ${height}, ${traceOptions.samples} samples in ${result.tracedSeconds.toFixed(2)} s on ${result.adapter}; wrote ${options.outputPath}`);
 }
 
@@ -302,6 +356,10 @@ async function runFetchAddon(rest) {
     throw new CliFailure(error.message, EXIT_NO_ADDON);
   }
   console.log(`Downloaded the prebuilt addon to ${addonPath}`);
+  const overrideWarning = describeAddonOverrideWarning(process.env.COOK_ADDON_PATH, addonPath);
+  if (overrideWarning !== null) {
+    console.warn(overrideWarning);
+  }
 }
 
 try {
