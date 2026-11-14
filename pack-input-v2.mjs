@@ -1750,7 +1750,33 @@ function sanitizeEnvironmentChannel(value, limit) {
   return Math.min(limit, number);
 }
 
-function packEnvironmentTexelsV2(environment, options = {}) {
+/**
+ * The importance of each texel, from the radiance the kernel reads: `lgt_eval_hdri_texel` filters the map bilinearly, so the
+ * light a texel's footprint carries is the integral of that reconstruction, not the value at its centre. The footprint is four
+ * quarter-texels, and the bilinear integral over one is the mean of its four corner texels, so the integral over the whole
+ * footprint is the luminance filtered with [1 2 1; 2 4 2; 1 2 1] / 16. Columns wrap around and rows clamp, as the kernel's
+ * lookup does, so the skirt of a sun gets weight in the texels it spills into. The sum over the map is unchanged.
+ */
+function filterLuminanceLikeBilinearLookup(luminanceValues, width, height) {
+  const filtered = new Float64Array(luminanceValues.length);
+  const tapWeights = [1, 2, 1];
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let sum = 0;
+      for (let rowOffset = -1; rowOffset <= 1; rowOffset++) {
+        const row = Math.min(height - 1, Math.max(0, y + rowOffset));
+        for (let columnOffset = -1; columnOffset <= 1; columnOffset++) {
+          const column = (x + columnOffset + width) % width;
+          sum += luminanceValues[row * width + column] * tapWeights[rowOffset + 1] * tapWeights[columnOffset + 1];
+        }
+      }
+      filtered[y * width + x] = sum / 16;
+    }
+  }
+  return filtered;
+}
+
+export function packEnvironmentTexelsV2(environment, options = {}) {
   if (!environment || !(environment.width > 0 && environment.height > 0)) {
     const bg = options.backgroundColor ?? [0, 0, 0];
     return {
@@ -1788,6 +1814,16 @@ function packEnvironmentTexelsV2(environment, options = {}) {
   const deltaPhi = (2 * Math.PI) / width;
   const deltaTheta = Math.PI / height;
   let totalWeight = 0;
+  const texelLuminance = new Float64Array(pixelCount);
+
+  for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex++) {
+    const srcBase = pixelIndex * channels;
+    const r = sanitizeEnvironmentChannel(source[srcBase], channelLimit);
+    const g = sanitizeEnvironmentChannel(source[srcBase + 1], channelLimit);
+    const b = sanitizeEnvironmentChannel(source[srcBase + 2], channelLimit);
+    texelLuminance[pixelIndex] = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  }
+  const importanceLuminance = filterLuminanceLikeBilinearLookup(texelLuminance, width, height);
 
   for (let y = 0; y < height; y++) {
     const sinTheta = Math.sin(Math.PI * (y + 0.5) / height);
@@ -1804,7 +1840,7 @@ function packEnvironmentTexelsV2(environment, options = {}) {
       texels[dstBase + 2] = b;
       texels[dstBase + 3] = 1.0;
 
-      const weight = (0.2126 * r + 0.7152 * g + 0.0722 * b) * intensity * sinTheta * deltaPhi * deltaTheta;
+      const weight = importanceLuminance[pixelIndex] * intensity * sinTheta * deltaPhi * deltaTheta;
       pixelWeights[pixelIndex] = weight;
       rowSum += weight;
     }
