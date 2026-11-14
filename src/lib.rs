@@ -22,7 +22,7 @@ use crate::host::cycles_session::{
 };
 use crate::host::cycles_update::UpdatableTable;
 use crate::host::session::{
-    get_cycles_device_context, note_environment_closing, note_environment_loaded, prepare_scene, run_cycles_lobe_probe, trace_samples, CyclesTrace, JobShape,
+    discard_cached_device, get_cycles_device_context, note_environment_closing, note_environment_loaded, prepare_scene, run_cycles_lobe_probe, trace_samples, CyclesTrace, JobShape,
 };
 
 /// Registers the shutdown step that destroys the GPU device before the process exits (see `note_environment_closing`).
@@ -80,11 +80,39 @@ fn panic_error(entry_point: &str, payload: &(dyn Any + Send)) -> napi::Error {
 }
 
 /// Turns a panic inside an entry point into a JavaScript error instead of aborting the process. The closure owns its
-/// inputs and nothing it touches is reused after a panic, except a session, which `guard_session_call` closes.
+/// inputs. The process-wide device cache is the one shared thing it touches, and a panic may have left that device
+/// mid submit, so the cache is dropped and the next call opens a fresh device. A session is closed by `guard_session_call`.
 fn guard_panics<Value>(entry_point: &str, body: impl FnOnce() -> Result<Value>) -> Result<Value> {
+    guard_panics_then(entry_point, body, discard_cached_device)
+}
+
+fn guard_panics_then<Value>(
+    entry_point: &str,
+    body: impl FnOnce() -> Result<Value>,
+    after_panic: impl FnOnce(),
+) -> Result<Value> {
     match catch_unwind(AssertUnwindSafe(body)) {
         Ok(outcome) => outcome,
-        Err(payload) => Err(panic_error(entry_point, payload.as_ref())),
+        Err(payload) => {
+            let _ = catch_unwind(AssertUnwindSafe(after_panic));
+            Err(panic_error(entry_point, payload.as_ref()))
+        }
+    }
+}
+
+/// Runs `body` on `target`. A panic can leave the target half updated, so `close_target` runs and the panic becomes an error.
+fn guard_target_call<Target, Value>(
+    target: &mut Target,
+    entry_point: &str,
+    body: impl FnOnce(&mut Target) -> Result<Value>,
+    close_target: impl FnOnce(&mut Target),
+) -> Result<Value> {
+    match catch_unwind(AssertUnwindSafe(|| body(&mut *target))) {
+        Ok(outcome) => outcome,
+        Err(payload) => {
+            let _ = catch_unwind(AssertUnwindSafe(|| close_target(&mut *target)));
+            Err(panic_error(entry_point, payload.as_ref()))
+        }
     }
 }
 
@@ -580,14 +608,7 @@ impl NativeCyclesSession {
         entry_point: &str,
         body: impl FnOnce(&mut CyclesSession) -> Result<Value>,
     ) -> Result<Value> {
-        let session = &mut self.session;
-        match catch_unwind(AssertUnwindSafe(|| body(&mut *session))) {
-            Ok(outcome) => outcome,
-            Err(payload) => {
-                let _ = catch_unwind(AssertUnwindSafe(|| session.close()));
-                Err(panic_error(entry_point, payload.as_ref()))
-            }
-        }
+        guard_target_call(&mut self.session, entry_point, body, |session| session.close())
     }
 }
 
@@ -728,4 +749,97 @@ pub fn trace_texels(input: NativeTraceInput, texels: NativeTexels, options: Nati
             traced_seconds,
         })
     })
+}
+
+#[cfg(test)]
+mod panic_guard_tests {
+    use super::*;
+
+    fn panicking_with_text() -> Result<u32> {
+        panic!("static text");
+    }
+
+    #[test]
+    fn a_panic_with_a_str_message_becomes_an_error_that_names_the_entry_point() {
+        let error = guard_panics_then("trace_scene", panicking_with_text, || {}).unwrap_err();
+        assert!(error.reason.contains("trace_scene"), "{}", error.reason);
+        assert!(error.reason.contains("static text"), "{}", error.reason);
+    }
+
+    #[test]
+    fn a_panic_with_a_string_message_keeps_the_message() {
+        let error = guard_panics_then("denoise_atrous", || -> Result<u32> { panic!("{} lights", 3) }, || {}).unwrap_err();
+        assert!(error.reason.contains("denoise_atrous"), "{}", error.reason);
+        assert!(error.reason.contains("3 lights"), "{}", error.reason);
+    }
+
+    #[test]
+    fn a_panic_with_another_payload_falls_back_to_no_message() {
+        let error = guard_panics_then(
+            "trace_texels",
+            || -> Result<u32> { std::panic::panic_any(42_u32) },
+            || {},
+        )
+        .unwrap_err();
+        assert!(error.reason.contains("trace_texels"), "{}", error.reason);
+        assert!(error.reason.contains("no message"), "{}", error.reason);
+    }
+
+    #[test]
+    fn a_successful_call_passes_through_and_skips_the_cleanup() {
+        let mut cleanup_ran = false;
+        let outcome = guard_panics_then("trace_scene", || Ok(7_u32), || cleanup_ran = true);
+        assert_eq!(outcome.unwrap(), 7);
+        assert!(!cleanup_ran);
+    }
+
+    #[test]
+    fn an_error_returned_without_a_panic_is_kept_and_skips_the_cleanup() {
+        let mut cleanup_ran = false;
+        let error = guard_panics_then("trace_scene", || -> Result<u32> { Err(failure("bad input")) }, || cleanup_ran = true)
+            .unwrap_err();
+        assert_eq!(error.reason, "bad input");
+        assert!(!cleanup_ran);
+    }
+
+    #[test]
+    fn a_panic_runs_the_cleanup_and_a_panicking_cleanup_does_not_hide_the_error() {
+        let error = guard_panics_then("trace_scene", panicking_with_text, || panic!("cleanup failed")).unwrap_err();
+        assert!(error.reason.contains("static text"), "{}", error.reason);
+    }
+
+    struct FakeSession {
+        closed: bool,
+    }
+
+    #[test]
+    fn a_panic_in_a_target_call_closes_the_target_and_names_the_entry_point() {
+        let mut session = FakeSession { closed: false };
+        let error = guard_target_call(
+            &mut session,
+            "render",
+            |_| -> Result<u32> { panic!("device lost mid frame") },
+            |target| target.closed = true,
+        )
+        .unwrap_err();
+        assert!(session.closed);
+        assert!(error.reason.contains("render"), "{}", error.reason);
+        assert!(error.reason.contains("device lost mid frame"), "{}", error.reason);
+    }
+
+    #[test]
+    fn a_target_call_that_succeeds_or_fails_normally_leaves_the_target_open() {
+        let mut session = FakeSession { closed: false };
+        let value = guard_target_call(&mut session, "reset", |_| Ok(5_u32), |target| target.closed = true).unwrap();
+        assert_eq!(value, 5);
+        let error = guard_target_call(
+            &mut session,
+            "reset",
+            |_| -> Result<u32> { Err(failure("bad options")) },
+            |target| target.closed = true,
+        )
+        .unwrap_err();
+        assert_eq!(error.reason, "bad options");
+        assert!(!session.closed);
+    }
 }

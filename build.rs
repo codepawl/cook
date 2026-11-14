@@ -64,7 +64,8 @@ fn read_pack_revision(packer_text: &str) -> String {
         let Some(after_name) = line.trim().strip_prefix("export const PACK_REVISION =") else {
             continue;
         };
-        let digits = after_name.trim().trim_end_matches(';').trim();
+        let before_semicolon = after_name.split(';').next().unwrap_or("");
+        let digits = before_semicolon.trim();
         if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
             return digits.to_string();
         }
