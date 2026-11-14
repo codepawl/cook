@@ -314,3 +314,59 @@ test('materialOverride 0xffffffff means no override', () => {
   assert.doesNotThrow(() => pack(triangleScene({}, { materialOverride: 0xffffffff })));
   assert.throws(() => pack(triangleScene({}, { materialOverride: 7 })), /`materialOverride` must be a whole number from 0 to 0, got 7/);
 });
+
+// Sun, 16-bit texture and normal map inputs (#24).
+
+function sunScene(sun) {
+  const scene = triangleScene();
+  scene.lights = { sun: { direction: [0, 1, 0], color: [1, 1, 1], ...sun } };
+  return scene;
+}
+
+test('a sun angularRadius that is not finite or sits in the delta-light blow-up range is refused with the range to pass', () => {
+  for (const badRadius of [Number.NaN, Infinity, -0.01, 1e-4, 2, '0.5x']) {
+    assert.throws(
+      () => pack(sunScene({ angularRadius: badRadius })),
+      (error) => error instanceof RangeError && /lights\.sun\.angularRadius must be 0 \(a delta sun\) or a finite angle/.test(error.message),
+      `angularRadius ${String(badRadius)} is refused`,
+    );
+  }
+});
+
+test('a sun angularRadius of 0, the minimum, a real sun and a left-out value pack', () => {
+  for (const goodSun of [{ angularRadius: 0 }, { angularRadius: 5e-4 }, { angularRadius: 0.00465 }, {}]) {
+    assert.doesNotThrow(() => pack(sunScene(goodSun)), JSON.stringify(goodSun));
+  }
+});
+
+function textureCollectorWith(data, width, height) {
+  const collector = createTextureCollector();
+  collector.addTexture({ image: { width, height, data } });
+  return collector;
+}
+
+test('a Uint16Array texture must hold exactly two half-float words per texel', () => {
+  assert.throws(
+    () => textureCollectorWith(new Uint16Array(4 * 3), 1, 1),
+    (error) => error instanceof RangeError && /needs 2 16-bit values .* but `data` has 12/.test(error.message) && /Float32Array/.test(error.message),
+  );
+  assert.throws(() => textureCollectorWith(new Uint16Array(3), 2, 1), /needs 4 16-bit values/);
+  assert.doesNotThrow(() => textureCollectorWith(new Uint16Array(4), 2, 1));
+});
+
+test('normalScale is one strength: equal pairs pass, different pairs are refused', () => {
+  const textureCollector = createTextureCollector();
+  const NORMAL_SCALE_BYTE_OFFSET = 184;
+  const packedStrength = (normalScale) => {
+    const record = packMaterialRecordV2({ normalScale }, textureCollector);
+    return new DataView(record.bytes.buffer, record.bytes.byteOffset).getFloat32(NORMAL_SCALE_BYTE_OFFSET, true);
+  };
+  assert.equal(packedStrength([0.5, 0.5]), 0.5);
+  assert.equal(packedStrength([-0.5, 0.5]), 0.5);
+  assert.equal(packedStrength(0.25), 0.25);
+  assert.equal(packedStrength(undefined), 1);
+  assert.throws(
+    () => packMaterialRecordV2({ normalScale: [1, 0] }, textureCollector),
+    (error) => error instanceof RangeError && /two different strengths/.test(error.message),
+  );
+});
