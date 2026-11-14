@@ -8,6 +8,10 @@ Cook is a path tracer for the GPU. It traces a scene with hardware ray queries (
 
 A scene reaches Cook as packed binary tables, the "FORMAT-v2" input ([FORMAT-v2.md](./FORMAT-v2.md)). The packers in this package build those tables, a `.cookpack` file stores them, and the command line renders such a file without any other code.
 
+![The Classroom at 1, 4, 16, 64, 256 and 1024 samples: the noise fades as samples add up](docs/media/classroom-samples.gif)
+
+<sub>Each sample adds one light path per pixel, so the noise fades as the samples add up. Sampling times on an NVIDIA A10G at 1280x720.</sub>
+
 ## Where it runs
 
 | Machine | Render with the GPU | Pack and read scenes |
@@ -46,8 +50,12 @@ You need Node 20.19 or newer and the driver of your GPU. On Windows x64 and Linu
 4. Render the test room. It writes `room.png`.
 
    ```sh
-   npx cook render node_modules/@codepawlhq/cook/fixtures/room.cookpack --output room.png
+   npx cook render node_modules/@codepawlhq/cook/fixtures/room.cookpack --output room.png --width 800 --samples 256
    ```
+
+   <img src="docs/media/room.jpg" width="320" alt="The test room: a pink box and a blue box under a ceiling light">
+
+   The room renders at 800x600 and 256 samples in about 1 second on an A10G. The first render in a new process also compiles the shaders, which adds 10 to 15 seconds.
 
 `cook fetch-addon` takes the addon of the installed version from its GitHub release and checks its SHA-256 before it writes `build/render-native.node`. The Linux addon is built on Ubuntu 22.04, so it needs that glibc or a newer one. If the GPU is from AMD or Intel, Linux also needs its Vulkan driver: `sudo apt install mesa-vulkan-drivers`.
 
@@ -129,6 +137,10 @@ node bin/cook.mjs render fixtures/room.cookpack --output room.npy --samples 256 
 
 - `cook render <scene.cookpack> --output <file.png|file.npy>` renders with the `cycles` kernel. A `.png` is 8 bit with the ACES curve and gamma 2.2 that Crucible uses by default; a `.npy` is the linear float32 RGBA image, shape height x width x 4.
 - `--width`, `--height` change the size at the aspect ratio of the pack (the camera in the pack is fixed to it); `--samples`, `--max-seconds` (stops with exit code 4 and writes nothing), `--denoise none|atrous` and `--dispatch-samples` are the other options. Seed, camera and bounce limits are stored in the pack.
+- `--denoise atrous` smooths a render with few samples. It is fast and blurs fine detail. The picture shows the Classroom at 64 samples, before the filter on the left and after it on the right.
+
+  <img src="docs/media/classroom-denoise.jpg" width="480" alt="The Classroom at 64 samples, without and with the a-trous filter">
+
 - `cook info <scene.cookpack>` prints the container version, pack revision, image size, record counts and the table directory.
 - `cook --help` lists the options and the exit codes (0 done, 1 render failed, 2 wrong arguments, 3 unreadable or too new pack, 4 time limit, 5 addon not built or not loadable).
 
