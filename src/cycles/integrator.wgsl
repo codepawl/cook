@@ -519,7 +519,7 @@ fn int_build_shading_point(surface_hit: IntSurfaceHit, wo: vec3<f32>, ray_cone: 
   point.vertex_color = vertex_color;
   point.light_group_mask_hi = instance.light_group_mask_hi;
   point.uv_footprint = 0.0;
-  if ((kernel_params.kernel_flags & KERNEL_FLAG_TEXTURE_MIPS) != 0u) {
+  if (SCENE_HAS_TEXTURE_MIPS && (kernel_params.kernel_flags & KERNEL_FLAG_TEXTURE_MIPS) != 0u) {
     let uv_edge1 = uv0_1 - uv0_0;
     let uv_edge2 = uv0_2 - uv0_0;
     let twice_uv_area = abs(uv_edge1.x * uv_edge2.y - uv_edge2.x * uv_edge1.y);
@@ -815,7 +815,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       ray_visibility = INSTANCE_VISIBILITY_CAMERA;
       self_instance = INVALID_INDEX;
       self_triangle = INVALID_INDEX;
-      ray_cone = int_camera_ray_cone();
+      if (SCENE_HAS_TEXTURE_MIPS) {
+        ray_cone = int_camera_ray_cone();
+      }
 
       throughput = vec3<f32>(1.0);
       medium_sigma = vec3<f32>(0.0);
@@ -946,7 +948,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             throughput /= survival;
           }
         }
-        ray_cone = vec2<f32>(ray_cone.x + ray_cone.y * volume_scatter_t, ray_cone.y + 1.0);
+        if (SCENE_HAS_TEXTURE_MIPS) {
+          ray_cone = vec2<f32>(ray_cone.x + ray_cone.y * volume_scatter_t, ray_cone.y + 1.0);
+        }
         ray_origin = scatter_pos;
         ray_dir = next_dir;
         ray_t_min = 0.0;
@@ -1180,10 +1184,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
       }
 
-      ray_cone = vec2<f32>(
-        ray_cone.x + ray_cone.y * surface_hit.t,
-        ray_cone.y + int_bounce_cone_spread(&closure, bsdf_sample.sampled_lobe_type),
-      );
+      if (SCENE_HAS_TEXTURE_MIPS) {
+        ray_cone = vec2<f32>(
+          ray_cone.x + ray_cone.y * surface_hit.t,
+          ray_cone.y + int_bounce_cone_spread(&closure, bsdf_sample.sampled_lobe_type),
+        );
+      }
       ray_origin = int_ray_offset_origin(&point, bsdf_sample.wi);
       ray_dir = bsdf_sample.wi;
       ray_t_min = 0.0;

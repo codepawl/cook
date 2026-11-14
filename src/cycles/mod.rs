@@ -17,6 +17,7 @@ include!(concat!(env!("OUT_DIR"), "/cycles_manifest_files.rs"));
 
 // ---- KernelParamsV2 byte offsets (verified against pack-input-v2.mjs and abi.wgsl) ----
 const KERNEL_FLAG_LIGHT_TREE_PROBE: u32 = 128;
+const KERNEL_FLAG_TEXTURE_MIPS: u32 = 2048;
 const KP_KERNEL_FLAGS_BYTE: usize = 32;    // u32[8]
 const KP_ENV_WIDTH_BYTE: usize = 192;      // u32[48]
 const KP_ENV_HEIGHT_BYTE: usize = 196;     // u32[49]
@@ -521,6 +522,7 @@ pub(crate) fn specialize_kernel_source(source: &str, scene: &SceneSpecialization
     specialize!(THIN_FILM, has_thin_film);
     specialize!(F82, has_f82);
     specialize!(NORMAL_MAP, has_normal_map);
+    specialize!(TEXTURE_MIPS, (kernel_flags & KERNEL_FLAG_TEXTURE_MIPS) != 0);
     // Unlike the other sentinels this one defaults to `false`, so a kernel compiled without specialization reads no extension records.
     if has_diffuse_transmission {
         result = result.replace("const SCENE_HAS_DIFFUSE_TRANSMISSION: bool = false;", "const SCENE_HAS_DIFFUSE_TRANSMISSION: bool = true;");
@@ -783,6 +785,40 @@ mod specialization_tests {
         let clear = specialize_kernel_source(SESSION_TEST_SOURCE, &scene, &without_fog);
         assert!(fogged.contains("const SCENE_HAS_VOLUME: bool = true;"));
         assert!(clear.contains("const SCENE_HAS_VOLUME: bool = false;"));
+    }
+
+    #[test]
+    fn the_texture_mip_code_compiles_in_only_for_a_frame_that_sets_the_flag() {
+        const MIP_TEST_SOURCE: &str = "const SCENE_HAS_TEXTURE_MIPS: bool = true;";
+        let mat = make_mat(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, -1, -1);
+        let without_mips = make_kp(0, 0.0, 0, 0, 0.0);
+        let with_mips = make_kp(KERNEL_FLAG_TEXTURE_MIPS, 0.0, 0, 0, 0.0);
+        let input = dummy_input(&without_mips, &mat, &make_default_light(), &make_default_inst());
+        let scene = scan_scene_specialization(&input);
+        assert_eq!(specialize_kernel_source(MIP_TEST_SOURCE, &scene, &without_mips), "const SCENE_HAS_TEXTURE_MIPS: bool = false;");
+        assert_eq!(specialize_kernel_source(MIP_TEST_SOURCE, &scene, &with_mips), MIP_TEST_SOURCE);
+    }
+
+    #[test]
+    fn the_assembled_kernel_gates_every_ray_cone_update_behind_the_mip_constant() {
+        let kernel = assemble_cycles_kernel().expect("the kernel assembles");
+        assert!(kernel.contains("const SCENE_HAS_TEXTURE_MIPS: bool = true;"));
+        let lines: Vec<&str> = kernel.lines().map(str::trim).collect();
+        let mut ray_cone_update_count = 0;
+        for (line_index, line) in lines.iter().enumerate() {
+            if !line.starts_with("ray_cone = ") {
+                continue;
+            }
+            ray_cone_update_count += 1;
+            assert_eq!(
+                lines[line_index - 1],
+                "if (SCENE_HAS_TEXTURE_MIPS) {",
+                "a ray_cone update sits outside an `if (SCENE_HAS_TEXTURE_MIPS)` block"
+            );
+        }
+        assert_eq!(ray_cone_update_count, 3, "the camera, volume scatter and bounce updates of the ray cone");
+        assert!(kernel.contains("if (SCENE_HAS_TEXTURE_MIPS && uv_footprint > 0.0"));
+        assert!(kernel.contains("if (SCENE_HAS_TEXTURE_MIPS && (kernel_params.kernel_flags & KERNEL_FLAG_TEXTURE_MIPS) != 0u)"));
     }
 
     #[test]
@@ -1259,7 +1295,7 @@ mod tests {
         assert!(kernel.contains("const KERNEL_FLAG_TEXTURE_MIPS: u32 = 2048u;"));
         assert!(kernel.contains("return texture_sample_footprint(tex_index, raw_uv0, raw_uv1, 0.0);"));
         assert!(kernel.contains("texture_sample_footprint(tex_index, (*point).uv0, (*point).uv1, (*point).uv_footprint)"));
-        assert!(kernel.contains("if (uv_footprint > 0.0 && mip_count > 1u && !is_nearest)"));
+        assert!(kernel.contains("if (SCENE_HAS_TEXTURE_MIPS && uv_footprint > 0.0 && mip_count > 1u && !is_nearest)"));
         let build_start = kernel.find("fn int_build_shading_point(").expect("the shading point builder exists");
         let build_body = &kernel[build_start..];
         let flag_test = build_body.find("(kernel_params.kernel_flags & KERNEL_FLAG_TEXTURE_MIPS) != 0u").expect("the footprint is gated by the flag");

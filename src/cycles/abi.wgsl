@@ -130,6 +130,9 @@ const SCENE_HAS_F82: bool = true;
 // flags above, `false` is the safe default: only the host's specialization turns it on, for a table that carries them.
 const SCENE_HAS_DIFFUSE_TRANSMISSION: bool = false;
 const SCENE_HAS_NORMAL_MAP: bool = true;
+// False when the frame leaves KERNEL_FLAG_TEXTURE_MIPS off: the ray cone and the trilinear lookup then compile out. Left in
+// as run-time branches they cost a fogged, textured scene about five times the sampling time though it never used them.
+const SCENE_HAS_TEXTURE_MIPS: bool = true;
 const SCENE_HAS_EMISSIVE_TRIANGLES: bool = true;
 const SCENE_HAS_ANALYTIC_LIGHTS: bool = true;
 const SCENE_HAS_FINITE_LIGHTS: bool = true;

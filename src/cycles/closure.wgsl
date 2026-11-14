@@ -221,7 +221,7 @@ fn texture_sample_footprint(tex_index: i32, raw_uv0: vec2<f32>, raw_uv1: vec2<f3
   let h_i = i32(desc.height);
 
   let mip_count = (flags >> 8u) & 0xFFu;
-  if (uv_footprint > 0.0 && mip_count > 1u && !is_nearest) {
+  if (SCENE_HAS_TEXTURE_MIPS && uv_footprint > 0.0 && mip_count > 1u && !is_nearest) {
     let texels_across_u = uv_footprint * abs(desc.uv_scale.x) * f32(w_i);
     let texels_across_v = uv_footprint * abs(desc.uv_scale.y) * f32(h_i);
     let level_of_detail = log2(max(max(texels_across_u, texels_across_v), 1.0e-6));
