@@ -141,6 +141,13 @@ fn release_cached_device() {
     }
 }
 
+/// Drops the cached device without waiting on it, so the next call opens a fresh one. Used after a panic, when the device
+/// may be mid submit or mid readback and a wait could hang. Sessions still open keep their own clones.
+pub(crate) fn discard_cached_device() {
+    let discarded = lock_device_cache().take();
+    drop(discarded);
+}
+
 /// Returns cloned device/queue/metadata from the cache, opening once per process.
 /// When the device was lost the cache is dropped and a fresh device is opened.
 pub(crate) fn get_cached_device() -> Result<(wgpu::Device, wgpu::Queue, String, String, String)> {
@@ -335,7 +342,7 @@ const SUBSURFACE_OFFSET_BYTE_OFFSET: usize = 60 * 4;
 const SAMPLE_INDEX_BYTE_OFFSET: u64 = 43 * 4;
 const SAMPLES_PER_WAIT: u32 = 4;
 
-const KERNEL_PARAMS_V2_BYTES: usize = 320;
+const KERNEL_PARAMS_V2_BYTES: usize = 336;
 const FORMAT_V2_MAGIC: u32 = 0x36375054;
 const FORMAT_V2_VERSION: u32 = 2;
 const MATERIAL_RECORD_BYTES: usize = 256;

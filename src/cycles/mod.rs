@@ -175,7 +175,7 @@ pub(crate) fn check_counts_match_kernel_params(input: &NativeTraceInputV2) -> Re
     for (name, input_count, byte_offset) in counts {
         if kernel_params.len() < byte_offset + 4 {
             return Err(failure(format!(
-                "kernelParams holds {} bytes, too few to read {name} at byte {byte_offset}. Pass the 320 byte KernelParamsV2 block.",
+                "kernelParams holds {} bytes, too few to read {name} at byte {byte_offset}. Pass the 336 byte KernelParamsV2 block.",
                 kernel_params.len()
             )));
         }
@@ -220,7 +220,7 @@ pub(crate) fn check_frame_params_keep_scene_counts(session_kernel_params: &[u8],
     for (name, byte_offset) in SCENE_BOUND_FIELDS {
         if session_kernel_params.len() < byte_offset + 4 || frame_kernel_params.len() < byte_offset + 4 {
             return Err(failure(format!(
-                "kernelParams must hold the 320 byte KernelParamsV2 block to read {name} at byte {byte_offset}."
+                "kernelParams must hold the 336 byte KernelParamsV2 block to read {name} at byte {byte_offset}."
             )));
         }
         let session_word = read_u32_le(session_kernel_params, byte_offset);
@@ -247,7 +247,7 @@ pub(crate) fn check_update_params_keep_scene_shape(session_kernel_params: &[u8],
         }
         if session_kernel_params.len() < byte_offset + 4 || update_kernel_params.len() < byte_offset + 4 {
             return Err(failure(format!(
-                "kernelParams must hold the 320 byte KernelParamsV2 block to read {name} at byte {byte_offset}."
+                "kernelParams must hold the 336 byte KernelParamsV2 block to read {name} at byte {byte_offset}."
             )));
         }
         let session_word = read_u32_le(session_kernel_params, byte_offset);
@@ -615,7 +615,7 @@ mod specialization_tests {
     }
 
     fn make_kp(kernel_flags: u32, volume_density: f32, env_width: u32, env_height: u32, env_total_weight: f32) -> Vec<u8> {
-        let mut kp = vec![0u8; 320];
+        let mut kp = vec![0u8; 336];
         // magic & version at bytes 0-7
         kp[0..4].copy_from_slice(&0x36375054u32.to_le_bytes());
         kp[4..8].copy_from_slice(&2u32.to_le_bytes());
@@ -1282,7 +1282,7 @@ fn ").unwrap_or(sample_body.len());
         let lights = make_default_light();
         let input = dummy_input(&[0u8; 16], &mat, &lights, &inst);
         let message = check_counts_match_kernel_params(&input).unwrap_err().reason;
-        assert!(message.contains("320"), "{message}");
+        assert!(message.contains("336"), "{message}");
     }
 
     fn set_portal_count(kernel_params: &mut [u8], portal_count: u32) {
@@ -1611,6 +1611,67 @@ mod tests {
         assert!(kernel[integrator_start..integrator_end].contains("LOBE_DIFFUSE_TRANSMISSION"));
         assert!(kernel.contains("(SCENE_HAS_GLASS || SCENE_HAS_DIFFUSE_TRANSMISSION) && int_closure_has_transmission(&closure)"));
         assert!(kernel.contains("&& !is_diffuse_transmission"), "a sheet is not a medium boundary");
+    }
+
+    /// A closure with no evaluable lobe (smooth glass, mirror, pure transparent) skips the direct light loop. The skip must follow
+    /// exactly the lobes `closure_eval` can give light to, or the image would change.
+    #[test]
+    fn the_direct_light_loop_is_skipped_only_when_no_lobe_can_be_evaluated() {
+        let kernel = assemble_cycles_kernel().expect("the kernel assembles");
+        let test_start = kernel.find("fn int_closure_has_evaluable_lobe(").expect("the evaluable lobe test exists");
+        let test_end = test_start + kernel[test_start..].find("\n}").expect("the test ends");
+        let test_body = &kernel[test_start..test_end];
+        assert!(test_body.contains("lobe.sample_weight <= 0.0"));
+        assert!(test_body.contains("bsdf_mf_is_singular(lobe.alpha_x, lobe.alpha_y)"));
+        for evaluable_lobe in ["LOBE_DIFFUSE", "LOBE_SHEEN", "LOBE_DIFFUSE_TRANSMISSION"] {
+            assert!(test_body.contains(&format!("lobe.lobe_type == {evaluable_lobe}")), "{evaluable_lobe} is always evaluable");
+        }
+        assert!(!test_body.contains("LOBE_TRANSPARENT"), "a transparent lobe is never evaluated");
+        assert!(kernel.contains("select(0u, 3u, rng.use_sobol_burley == 0u || int_closure_has_evaluable_lobe(&closure))"));
+    }
+
+    /// One shadow ray per vertex: every direct sample is evaluated unshadowed, one is picked by the luminance of that value, and its
+    /// value is divided by the pick probability before the firefly clamp. With the flag clear each sample keeps its own ray.
+    #[test]
+    fn one_shadow_ray_is_picked_by_unshadowed_luminance_and_rescaled_before_the_clamp() {
+        let kernel = assemble_cycles_kernel().expect("the kernel assembles");
+        assert!(kernel.contains("const KERNEL_FLAG_SHADOW_RAY_PICK: u32 = 4096u;"));
+        assert!(kernel.contains("const SMP_SLOT_SHADOW_PICK: u32 = 13u;"));
+        assert!(kernel.contains("(kernel_params.kernel_flags & KERNEL_FLAG_SHADOW_RAY_PICK) != 0u"));
+
+        let pick_start = kernel.find("fn int_accumulate_picked_direct_sample(").expect("the picker exists");
+        let pick_end = pick_start + kernel[pick_start..].find("
+}").expect("the picker ends");
+        let pick_body = &kernel[pick_start..pick_end];
+        assert!(pick_body.contains("int_luminance((*unshadowed_values)[candidate_index])"));
+        assert!(pick_body.contains("pick_weights[picked_index] / total_weight"));
+        assert_eq!(pick_body.matches("int_direct_sample_visibility(").count(), 1, "one shadow ray");
+        let rescale = pick_body.find("/ pick_probability").expect("the value is divided by the pick probability");
+        let clamp = pick_body.find("int_clamp_contribution(rescaled * visibility").expect("the clamp acts on the rescaled value");
+        assert!(rescale < clamp);
+
+        let accumulate_start = kernel.find("fn int_accumulate_direct_sample(").expect("the per-sample path exists");
+        let accumulate_end = accumulate_start + kernel[accumulate_start..].find("
+}").expect("the function ends");
+        assert!(kernel[accumulate_start..accumulate_end].contains("int_direct_sample_visibility(sample, point, transparent_bounces)"));
+    }
+
+    /// The environment lookup starts from the packer's guide and searches only between two guide entries, with the same comparison as
+    /// a search of the whole table, so the sampled texel does not change.
+    #[test]
+    fn the_environment_lookup_searches_between_two_guide_entries() {
+        let kernel = assemble_cycles_kernel().expect("the kernel assembles");
+        let search_start = kernel.find("fn lgt_search_env_cdf(").expect("the lookup exists");
+        let search_end = search_start + kernel[search_start..].find("
+}").expect("the lookup ends");
+        let search_body = &kernel[search_start..search_end];
+        assert!(search_body.contains("1u << firstLeadingBit(count)"));
+        assert!(search_body.contains("var low = u32(environment_texels[base_offset + bucket].z);"));
+        assert!(search_body.contains("high = u32(environment_texels[base_offset + bucket + 1u].z);"));
+        assert!(search_body.contains("environment_texels[base_offset + mid].x <= pick_u"));
+        assert!(kernel.contains("lgt_search_env_cdf(cdf_base, height, sample_u4.x)"));
+        assert!(kernel.contains("lgt_search_env_cdf(cond_base, width, sample_u4.y)"));
+        assert!(!kernel.contains("lgt_binary_search_env_cdf"));
     }
 
     /// The mip levels sit after level 0 in one run of words (`texture_fetch_texel` stays the only reader of the pool).

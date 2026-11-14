@@ -793,15 +793,15 @@ mod tests {
 
     #[test]
     fn render_parameters_carry_the_image_size_and_the_sample_count_and_nothing_else() {
-        let mut frame = vec![0xABu8; 320];
+        let mut frame = vec![0xABu8; 336];
         frame[0..4].copy_from_slice(&0x36375054u32.to_le_bytes());
         let patched = patch_render_parameters(&frame, 1920, 1080, 64);
-        assert_eq!(patched.len(), 320);
+        assert_eq!(patched.len(), 336);
         assert_eq!(&patched[8..12], &1920u32.to_le_bytes());
         assert_eq!(&patched[12..16], &1080u32.to_le_bytes());
         assert_eq!(&patched[24..28], &64u32.to_le_bytes());
         let untouched = |index: &usize| !(8..16).contains(index) && !(24..28).contains(index);
-        assert!((0..320).filter(untouched).all(|index| patched[index] == frame[index]));
+        assert!((0..336).filter(untouched).all(|index| patched[index] == frame[index]));
     }
 
     #[test]
@@ -841,7 +841,7 @@ mod tests {
         lights[124..128].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
         NativeTraceInputV2 {
             schema_version: 2,
-            kernel_params: Uint8Array::new(vec![0u8; 320]),
+            kernel_params: Uint8Array::new(vec![0u8; 336]),
             instances: Uint8Array::new(vec![0u8; 160]),
             instance_count: 1,
             triangles: Uint8Array::new(vec![0u8; 224]),

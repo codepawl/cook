@@ -329,9 +329,17 @@ fn lgt_binary_search_emissive_cdf(pick_u: f32, count: u32) -> u32 {
   return low;
 }
 
-fn lgt_binary_search_env_cdf(base_offset: u32, count: u32, pick_u: f32) -> u32 {
-  var low = 0u;
+// First index of a cumulative table of `count` entries (`x` of each entry) whose value is above `pick_u`, the last index when none
+// is. The `z` of the entries is the guide the packer writes (writeEnvironmentGuide in pack-input-v2.mjs): the bucket of `pick_u`
+// bounds the answer between two stored indices, so the search covers a few entries and the result equals a search of the whole table.
+fn lgt_search_env_cdf(base_offset: u32, count: u32, pick_u: f32) -> u32 {
+  let bucket_count = 1u << firstLeadingBit(count);
+  let bucket = min(u32(clamp(pick_u, 0.0, 1.0) * f32(bucket_count)), bucket_count - 1u);
+  var low = u32(environment_texels[base_offset + bucket].z);
   var high = count - 1u;
+  if (bucket + 1u < bucket_count) {
+    high = u32(environment_texels[base_offset + bucket + 1u].z);
+  }
   for (var step = 0u; step < 24u; step += 1u) {
     if (low >= high) {
       break;
@@ -971,13 +979,13 @@ fn lgt_sample_environment(shading_pos: vec3<f32>, sample_u4: vec4<f32>) -> LgtDi
     return lgt_sample_environment_through_portal(shading_pos, sample_u4);
   }
   let cdf_base = kernel_params.env_cdf_offset;
-  let row = lgt_binary_search_env_cdf(cdf_base, height, sample_u4.x);
+  let row = lgt_search_env_cdf(cdf_base, height, sample_u4.x);
   let marginal_prob = environment_texels[cdf_base + row].y;
   if (marginal_prob <= 0.0) {
     return out;
   }
   let cond_base = cdf_base + height + row * width;
-  let col = lgt_binary_search_env_cdf(cond_base, width, sample_u4.y);
+  let col = lgt_search_env_cdf(cond_base, width, sample_u4.y);
   let cond_prob = environment_texels[cond_base + col].y;
   if (cond_prob <= 0.0) {
     return out;
