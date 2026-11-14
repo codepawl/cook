@@ -18,7 +18,7 @@ export const COOK_TIME_LIMIT_CODE = 'COOK_TIME_LIMIT';
 export const COOK_PACK_REVISION_CODE = 'COOK_PACK_REVISION';
 
 /** The oldest pack revision the host still reads. The newest is `PACK_REVISION` (the host and the packer ship together). */
-export const OLDEST_READABLE_PACK_REVISION = 1;
+export const OLDEST_READABLE_PACK_REVISION = 2;
 
 // Limits the packer checks with literals in `validatePackOptions`; tests/engine.test.mjs pins them to the real checks.
 const MAX_IMAGE_SIDE = 16384;

@@ -21,7 +21,7 @@ export const INVALID_INDEX_V2 = 0xffffffff;
 // before it render differently or fail on the host (a field changes meaning, a table gains required content, a flag changes
 // its default). A change that old inputs still render correctly under does not bump it. The pack file, the engine
 // description (`describeEngine().packFormat`) and the host's revision check all read this one constant.
-export const PACK_REVISION = 1;
+export const PACK_REVISION = 2;
 
 // Byte offset of `filter_glossy` inside a `KernelParamsV2` buffer (u32[75] * 4 = 300).
 // Used in `packKernelParamsV2` and in `index.mjs` when patching a pre-built buffer.
@@ -38,7 +38,7 @@ export const VALID_LIGHT_SAMPLING = Object.freeze(['auto', 'tree', 'uniform']);
 export const LIGHT_TREE_AUTO_MIN_EMITTERS = 1;
 
 export const STRUCT_STRIDES_V2 = Object.freeze({
-  kernelParams: 320,
+  kernelParams: 336,
   instance: 160,
   triangle: 224,
   material: 256,
@@ -2087,6 +2087,11 @@ export function validatePackOptions(options, callerName, requireDimensionsAndSam
 }
 
 export const MAX_APERTURE_BLADES = 64;
+export const MIN_APERTURE_RATIO = 0.01;
+export const MAX_APERTURE_RATIO = 100;
+// Byte offset of `aperture_ratio` inside a `KernelParamsV2` buffer (f32[80] * 4 = 320).
+const KERNEL_PARAMS_V2_APERTURE_RATIO_BYTE_OFFSET = 320;
+const KERNEL_PARAMS_V2_APERTURE_RATIO_WORD_INDEX = KERNEL_PARAMS_V2_APERTURE_RATIO_BYTE_OFFSET / 4;
 
 /** The thin lens a v1 params block carries (see THIN_LENS_FLOAT_INDEXES in pack-input.mjs); nothing for a pinhole, so its bytes stay as they were. */
 function readV1ThinLens(paramF32) {
@@ -2106,7 +2111,8 @@ function requireThinLensNumber(value, name, callerName, isValid, expectation) {
 /**
  * The thin lens of a camera, from the camera object (as `createCamera` returns it for a camera with an `fStop`) or from the
  * same names in `options`: `apertureRadius` (scene units, 0 is a pinhole), `focalDistance` (along the view axis),
- * `apertureBlades` (0 for a round aperture, else 3 to 64) and `apertureRotation` (radians). A pinhole keeps the defaults
+ * `apertureBlades` (0 for a round aperture, else 3 to 64), `apertureRotation` (radians) and `apertureRatio` (anamorphic bokeh,
+ * width over height of the aperture, from 0.01 to 100, default 1 for a round or regular one; Cycles `aperture_ratio`). A pinhole keeps the defaults
  * the params block always held, so its bytes do not change. Throws a RangeError that says what to pass.
  */
 export function resolveThinLensParameters(camera, options, callerName) {
@@ -2122,7 +2128,11 @@ export function resolveThinLensParameters(camera, options, callerName) {
     `0 for a round aperture or a whole number from 3 to ${MAX_APERTURE_BLADES}`);
   const apertureRotation = camera?.apertureRotation ?? options.apertureRotation ?? 0;
   requireThinLensNumber(apertureRotation, 'apertureRotation', callerName, () => true, 'a finite number of radians');
-  return { apertureRadius, focalDistance, apertureBlades, apertureRotation };
+  const apertureRatio = camera?.apertureRatio ?? options.apertureRatio ?? 1;
+  requireThinLensNumber(apertureRatio, 'apertureRatio', callerName,
+    value => value >= MIN_APERTURE_RATIO && value <= MAX_APERTURE_RATIO,
+    `the width over height of the aperture, from ${MIN_APERTURE_RATIO} to ${MAX_APERTURE_RATIO} (1 is a round or regular aperture, 2 stretches the bokeh to twice as wide as tall)`);
+  return { apertureRadius, focalDistance, apertureBlades, apertureRotation, apertureRatio };
 }
 
 function effectiveCyclesClamp(value) {
@@ -2184,7 +2194,7 @@ function isOrthographicCamera(camera, options, heldOrthographic = false) {
   return heldOrthographic;
 }
 
-const THIN_LENS_FIELD_NAMES = ['apertureRadius', 'focalDistance', 'apertureBlades', 'apertureRotation'];
+const THIN_LENS_FIELD_NAMES = ['apertureRadius', 'focalDistance', 'apertureBlades', 'apertureRotation', 'apertureRatio'];
 
 // The options of the thin lens: those the caller gave, else the ones the block already holds.
 function thinLensOptionsWithHeld(options, heldThinLens) {
@@ -2249,6 +2259,7 @@ function writeCameraWordsV2(f32, u32, cameraWords) {
   f32[45] = Number(lensShift[1] ?? 0);
   u32[46] = thinLens.apertureBlades >>> 0;
   f32[47] = thinLens.apertureRotation;
+  f32[KERNEL_PARAMS_V2_APERTURE_RATIO_WORD_INDEX] = thinLens.apertureRatio;
 }
 
 const KERNEL_PARAMS_V2_SEED_BYTE_OFFSET = 28;
@@ -2274,6 +2285,7 @@ function readHeldCameraWords(view) {
       focalDistance: wordAt(43),
       apertureBlades: view.getUint32(46 * 4, true),
       apertureRotation: wordAt(47),
+      apertureRatio: wordAt(KERNEL_PARAMS_V2_APERTURE_RATIO_WORD_INDEX),
     },
   };
 }
@@ -2370,6 +2382,10 @@ export function packCameraParams(kernelParams, camera, options = {}) {
   patchedParams.set(
     new Uint8Array(scratchWords, KERNEL_PARAMS_V2_CAMERA_FIRST_BYTE_OFFSET, KERNEL_PARAMS_V2_CAMERA_BYTE_LENGTH),
     KERNEL_PARAMS_V2_CAMERA_FIRST_BYTE_OFFSET
+  );
+  patchedParams.set(
+    new Uint8Array(scratchWords, KERNEL_PARAMS_V2_APERTURE_RATIO_BYTE_OFFSET, 4),
+    KERNEL_PARAMS_V2_APERTURE_RATIO_BYTE_OFFSET
   );
 
   const heldOrthographic = (flags & KERNEL_FLAG_ORTHOGRAPHIC_CAMERA) !== 0;

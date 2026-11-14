@@ -157,7 +157,7 @@ const LOBE_FLAG_F82_TINT: u32 = 2u;
 const LOBE_FLAG_THIN_FILM: u32 = 4u;
 const LOBE_FLAG_THIN_WALLED: u32 = 8u;
 
-// 320 bytes (20 x 16 B), alignment 16 B.
+// 336 bytes (21 x 16 B), alignment 16 B.
 struct KernelParamsV2 {
   magic: u32,
   format_version: u32,
@@ -242,6 +242,12 @@ struct KernelParamsV2 {
   portal_count: u32,
   // Pixel origin of the tile this dispatch covers; the host writes it for every dispatch, `[0, 0]` for a whole-image dispatch.
   tile_origin: vec2<u32>,
+
+  // Anamorphic bokeh: the aperture width over its height (Cycles `aperture_ratio`); `0.0` is read as `1.0`.
+  aperture_ratio: f32,
+  reserved_aperture_0: u32,
+  reserved_aperture_1: u32,
+  reserved_aperture_2: u32,
 }
 
 // 160 bytes (10 x 16 B), alignment 16 B.

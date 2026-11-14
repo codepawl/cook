@@ -133,7 +133,7 @@ test('the committed fixture has the current pack revision and equals a fresh bui
 test('the decoded fixture is a valid input for the cycles kernel', () => {
   const decoded = decodePackFile(readFileSync(FIXTURE_PATH));
   const prepared = prepareCyclesInput(decoded, { width: ROOM_WIDTH, height: ROOM_HEIGHT, samples: 1 });
-  assert.equal(prepared.kernelParams.byteLength, 320);
+  assert.equal(prepared.kernelParams.byteLength, 336);
   assert.equal(prepared.triangleCount, 86);
 });
 
@@ -253,7 +253,7 @@ test('decoding refuses counts that disagree with the table sizes or with kernelP
     () => decodePackFile(withEntryField(bytes, 'triangles', 48, 224)),
     /triangleCount is 86 but table "triangles" holds 224 bytes/,
   );
-  expectPackFileError(() => decodePackFile(withEntryField(bytes, 'kernelParams', 48, 64)), /"kernelParams" must hold exactly 320 bytes/);
+  expectPackFileError(() => decodePackFile(withEntryField(bytes, 'kernelParams', 48, 64)), /"kernelParams" must hold exactly 336 bytes/);
   expectPackFileError(
     () => decodePackFile(withEntryField(bytes, 'lightToTree', 48, 4)),
     /"lightToTree" holds 4 bytes but lightCount \+ emissiveTriangleCount is 2/,
