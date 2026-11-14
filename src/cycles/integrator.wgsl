@@ -905,6 +905,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let film_normal_lane = film_accumulation[2u * pixel_count + pixel_index];
   var batch_albedo = film_albedo_lane.xyz;
   var batch_normal = film_normal_lane.xyz;
+  // The film sums, per sample, 1 where the camera path ends on the transparent background and 0 otherwise; resolve_image
+  // turns the mean into alpha = 1 - mean. A kernel that never writes the lane (the bootstrap and legacy ones) reads alpha 1.
+  var batch_background_coverage = film_albedo_lane.w;
   var taken_in_batch = 0u;
 
   // Per-path state lives outside the loops so that, with KERNEL_FLAG_PATH_REGENERATION, a path that ends is replaced by the
@@ -953,6 +956,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var first_albedo = vec3<f32>(0.0);
   var first_normal = vec3<f32>(0.0);
   var recorded_features = false;
+  var first_background_coverage = 0.0;
 
   loop {
     if (!path_active) {
@@ -1008,6 +1012,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       first_albedo = vec3<f32>(0.0);
       first_normal = vec3<f32>(0.0);
       recorded_features = false;
+      first_background_coverage = 0.0;
       path_step = 0u;
       path_active = true;
     }
@@ -1147,6 +1152,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         );
         if (escaped.x > 0.0 || escaped.y > 0.0 || escaped.z > 0.0) {
           sample_radiance += int_clamp_contribution(throughput * escaped, i32(bounce) - 1);
+        }
+        // The flag stays true only until the first event (a bounce or a volume scatter clears it), so an escape that still sees
+        // it set is a camera path that crossed nothing but transparent surfaces: it shows the background, alpha 0.
+        if (is_transparent_bg_ray) {
+          first_background_coverage = 1.0;
         }
         if (!recorded_features) {
           first_albedo = clamp(escaped, vec3<f32>(0.0), vec3<f32>(1.0));
@@ -1402,6 +1412,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       batch_depth += select(0.0, first_depth, first_depth >= 0.0 && first_depth < 1.0e29);
       batch_albedo += int_sanitize_radiance(first_albedo);
       batch_normal += first_normal;
+      batch_background_coverage += first_background_coverage;
       stats.x += lum;
       stats.y += lum * lum;
       stats.w += 1.0;
@@ -1411,7 +1422,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
   if (taken_in_batch > 0u) {
     film_accumulation[pixel_index] = vec4<f32>(batch_radiance, batch_depth);
-    film_accumulation[pixel_count + pixel_index] = vec4<f32>(batch_albedo, film_albedo_lane.w);
+    film_accumulation[pixel_count + pixel_index] = vec4<f32>(batch_albedo, batch_background_coverage);
     film_accumulation[2u * pixel_count + pixel_index] = vec4<f32>(batch_normal, film_normal_lane.w);
     film_accumulation[3u * pixel_count + pixel_index] = stats;
   }

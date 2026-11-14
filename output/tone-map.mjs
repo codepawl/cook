@@ -21,8 +21,9 @@ export function displayByte(linearValue) {
 }
 
 /**
- * Linear RGBA floats (four per pixel, rows from the top) as 8-bit RGBA with the same rows. Alpha is written as 255:
- * a trace does not return a usable alpha.
+ * Linear RGBA floats (four per pixel, rows from the top) as 8-bit RGBA with the same rows. The trace returns premultiplied
+ * radiance (as Cycles does) with coverage alpha; a PNG holds straight alpha, so a pixel with alpha below 1 is divided by it
+ * before the display curve. Alpha 1 (every pixel unless transparentBackground is on) is written as 255 and the colour is untouched.
  */
 export function toneMapToRgba8(linearRgba, width, height) {
   const pixelCount = width * height;
@@ -31,10 +32,13 @@ export function toneMapToRgba8(linearRgba, width, height) {
   }
   const rgba = new Uint8ClampedArray(pixelCount * 4);
   for (let pixel = 0; pixel < pixelCount; pixel++) {
+    const alpha = clampUnit(Number.isNaN(linearRgba[pixel * 4 + 3]) ? 1 : linearRgba[pixel * 4 + 3]);
+    const straightScale = alpha > 0 && alpha < 1 ? 1 / alpha : 1;
     for (let channel = 0; channel < 3; channel++) {
-      rgba[pixel * 4 + channel] = displayByte(linearRgba[pixel * 4 + channel]);
+      const premultiplied = linearRgba[pixel * 4 + channel];
+      rgba[pixel * 4 + channel] = alpha === 0 ? 0 : displayByte(premultiplied * straightScale);
     }
-    rgba[pixel * 4 + 3] = 255;
+    rgba[pixel * 4 + 3] = Math.round(alpha * 255);
   }
   return rgba;
 }
