@@ -1,6 +1,6 @@
 // Packs a trace scene into the tables the native kernel reads. It imports nothing from Node, so the job page can run it too.
 // 16 vectors: the 12 of the camera, lights and seed, the fog box and medium, and the subsurface table's first vector index.
-import { PACK_REVISION, SUN_DEFAULT_HALF_ANGLE } from './pack-input-v2.mjs';
+import { PACK_REVISION, SUN_DEFAULT_HALF_ANGLE, resolveVolumeAlbedo } from './pack-input-v2.mjs';
 
 const PARAMETER_BYTES = 16 * 16;
 const DEFAULT_FIREFLY_CLAMP = 20;
@@ -68,7 +68,7 @@ function writeParameters(scene, camera, options, lightCount, atlasWidth, subsurf
   const { volume } = scene;
   floats.set([...(volume?.minimum ?? [0, 0, 0]), volume?.density ?? 0], 48);
   floats.set([...(volume?.maximum ?? [0, 0, 0]), volume?.anisotropy ?? 0], 52);
-  floats.set([...(volume?.albedo ?? [1, 1, 1]), volume?.maxDistance ?? 0], 56);
+  floats.set([...resolveVolumeAlbedo(volume?.albedo, 'buildNativeInput'), volume?.maxDistance ?? 0], 56);
   words.set([subsurfaceOffset, 0, 0, 0], 60);
   // Word 61 carries `environment.cameraIntensity` for the "cycles" kernel upgrade; all bits zero means none, so a strength of 0 is stored as -0.
   // The legacy kernel does not read it.

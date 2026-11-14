@@ -4,6 +4,9 @@
 mod cycles;
 mod host;
 
+use std::any::Any;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
 use napi::bindgen_prelude::{Float32Array, Object, Uint32Array, Uint8Array};
 use napi::{Env, Result};
 use napi_derive::napi;
@@ -19,7 +22,7 @@ use crate::host::cycles_session::{
 };
 use crate::host::cycles_update::UpdatableTable;
 use crate::host::session::{
-    get_cycles_device_context, note_environment_closing, note_environment_loaded, prepare_scene, run_cycles_lobe_probe, trace_samples, CyclesTrace, JobShape,
+    discard_cached_device, get_cycles_device_context, note_environment_closing, note_environment_loaded, prepare_scene, run_cycles_lobe_probe, trace_samples, CyclesTrace, JobShape,
 };
 
 /// Registers the shutdown step that destroys the GPU device before the process exits (see `note_environment_closing`).
@@ -28,6 +31,89 @@ pub fn register_exit_cleanup(_exports: Object, env: Env) -> Result<()> {
     note_environment_loaded();
     env.add_env_cleanup_hook((), |()| note_environment_closing())?;
     Ok(())
+}
+
+/// Versions the JavaScript package compares against its own when it loads the addon (`loadNativeAddon` in index.mjs).
+const ADDON_VERSION: &str = env!("COOK_PACKAGE_VERSION");
+const ADDON_PACK_REVISION: u32 = parse_pack_revision(env!("COOK_PACK_REVISION"));
+
+const fn parse_pack_revision(text: &str) -> u32 {
+    let bytes = text.as_bytes();
+    let mut value: u32 = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        value = value * 10 + (bytes[index] - b'0') as u32;
+        index += 1;
+    }
+    value
+}
+
+#[napi(object)]
+pub struct AddonBuildInfo {
+    /// `version` of package.json when the addon was built.
+    pub version: String,
+    /// `PACK_REVISION` of pack-input-v2.mjs when the addon was built: the kernel's input layout revision.
+    pub pack_revision: u32,
+}
+
+/// What this addon was built from. Addons built before this export existed lack it; index.mjs treats that as unknown.
+#[napi]
+pub fn addon_build_info() -> AddonBuildInfo {
+    AddonBuildInfo { version: ADDON_VERSION.to_string(), pack_revision: ADDON_PACK_REVISION }
+}
+
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "no message".to_string()
+}
+
+fn panic_error(entry_point: &str, payload: &(dyn Any + Send)) -> napi::Error {
+    failure(&format!(
+        "Cook's native tracer hit an internal error in {entry_point}: {}. This is a bug in Cook; report it with the scene and the GPU name.",
+        panic_message(payload)
+    ))
+}
+
+/// Turns a panic inside an entry point into a JavaScript error instead of aborting the process. The closure owns its
+/// inputs. The process-wide device cache is the one shared thing it touches, and a panic may have left that device
+/// mid submit, so the cache is dropped and the next call opens a fresh device. A session is closed by `guard_session_call`.
+fn guard_panics<Value>(entry_point: &str, body: impl FnOnce() -> Result<Value>) -> Result<Value> {
+    guard_panics_then(entry_point, body, discard_cached_device)
+}
+
+fn guard_panics_then<Value>(
+    entry_point: &str,
+    body: impl FnOnce() -> Result<Value>,
+    after_panic: impl FnOnce(),
+) -> Result<Value> {
+    match catch_unwind(AssertUnwindSafe(body)) {
+        Ok(outcome) => outcome,
+        Err(payload) => {
+            let _ = catch_unwind(AssertUnwindSafe(after_panic));
+            Err(panic_error(entry_point, payload.as_ref()))
+        }
+    }
+}
+
+/// Runs `body` on `target`. A panic can leave the target half updated, so `close_target` runs and the panic becomes an error.
+fn guard_target_call<Target, Value>(
+    target: &mut Target,
+    entry_point: &str,
+    body: impl FnOnce(&mut Target) -> Result<Value>,
+    close_target: impl FnOnce(&mut Target),
+) -> Result<Value> {
+    match catch_unwind(AssertUnwindSafe(|| body(&mut *target))) {
+        Ok(outcome) => outcome,
+        Err(payload) => {
+            let _ = catch_unwind(AssertUnwindSafe(|| close_target(&mut *target)));
+            Err(panic_error(entry_point, payload.as_ref()))
+        }
+    }
 }
 
 const KERNEL_SOURCE: &str = include_str!("kernel.wgsl");
@@ -247,46 +333,48 @@ fn select_kernel_source(requested_kernel: Option<&str>) -> Result<(String, bool)
 /// Traces the packed legacy v1 scene on the GPU with hardware ray queries.
 #[napi]
 pub fn trace_scene(input: NativeTraceInput, options: NativeTraceOptions) -> Result<NativeTraceResult> {
-    let (source, rewrite_specialization_flags) = select_kernel_source(options.kernel.as_deref())?;
-    let pixel_count = options.width as u64 * options.height as u64;
-    let accumulation_bytes = image_accumulation_bytes(options.width, options.height);
-    let prepared = prepare_scene(
-        &input,
-        JobShape {
-            source,
-            entry_point: "main",
-            rewrite_specialization_flags,
-            accumulation_bytes,
-            extra_buffers: Vec::new(),
-        },
-    )?;
-    let groups = image_workgroups(options.width, options.height);
-    let (sums, traced_seconds) = trace_samples(&prepared, options.samples, groups, accumulation_bytes, options.max_seconds)?;
-    let resolved = resolve_image(&sums, pixel_count);
-    Ok(NativeTraceResult {
-        rgba: Float32Array::new(resolved.rgba),
-        denoised_rgba: None,
-        denoise_seconds: None,
-        denoise_gpu_seconds: None,
-        denoise_compile_seconds: None,
-        albedo: Float32Array::new(resolved.albedo),
-        normal: Float32Array::new(resolved.normal),
-        depth: Float32Array::new(resolved.depth),
-        variance: Float32Array::new(resolved.variance),
-        average_samples: resolved.average_samples,
-        samples_per_dispatch: None,
-        longest_dispatch_seconds: None,
-        dispatch_count: None,
-        smallest_tile_pixels: None,
-        largest_tile_pixels: None,
-        adapter: prepared.adapter_name,
-        backend: prepared.backend_name,
-        features: prepared.features,
-        setup_seconds: prepared.setup_seconds,
-        compile_seconds: prepared.compile_seconds,
-        upload_seconds: prepared.upload_seconds,
-        acceleration_build_seconds: prepared.acceleration_build_seconds,
-        traced_seconds,
+    guard_panics("trace_scene", || {
+        let (source, rewrite_specialization_flags) = select_kernel_source(options.kernel.as_deref())?;
+        let pixel_count = options.width as u64 * options.height as u64;
+        let accumulation_bytes = image_accumulation_bytes(options.width, options.height);
+        let prepared = prepare_scene(
+            &input,
+            JobShape {
+                source,
+                entry_point: "main",
+                rewrite_specialization_flags,
+                accumulation_bytes,
+                extra_buffers: Vec::new(),
+            },
+        )?;
+        let groups = image_workgroups(options.width, options.height);
+        let (sums, traced_seconds) = trace_samples(&prepared, options.samples, groups, accumulation_bytes, options.max_seconds)?;
+        let resolved = resolve_image(&sums, pixel_count);
+        Ok(NativeTraceResult {
+            rgba: Float32Array::new(resolved.rgba),
+            denoised_rgba: None,
+            denoise_seconds: None,
+            denoise_gpu_seconds: None,
+            denoise_compile_seconds: None,
+            albedo: Float32Array::new(resolved.albedo),
+            normal: Float32Array::new(resolved.normal),
+            depth: Float32Array::new(resolved.depth),
+            variance: Float32Array::new(resolved.variance),
+            average_samples: resolved.average_samples,
+            samples_per_dispatch: None,
+            longest_dispatch_seconds: None,
+            dispatch_count: None,
+            smallest_tile_pixels: None,
+            largest_tile_pixels: None,
+            adapter: prepared.adapter_name,
+            backend: prepared.backend_name,
+            features: prepared.features,
+            setup_seconds: prepared.setup_seconds,
+            compile_seconds: prepared.compile_seconds,
+            upload_seconds: prepared.upload_seconds,
+            acceleration_build_seconds: prepared.acceleration_build_seconds,
+            traced_seconds,
+        })
     })
 }
 
@@ -497,10 +585,12 @@ fn update_tables<'a>(options: &'a NativeSessionUpdateOptions) -> Vec<(UpdatableT
 /// Traces a packed `FORMAT-v2` scene on the GPU using the assembled Cycles-parity WGSL kernel: a session that renders once.
 #[napi]
 pub fn trace_scene_cycles(input: NativeTraceInputV2, options: NativeCyclesTraceOptions) -> Result<NativeTraceResult> {
-    parse_denoise_option(options.denoise.as_deref())?;
-    let mut session = CyclesSession::create(&input)?;
-    let rendered = render_session_frame(&mut session, &options)?;
-    Ok(rendered.trace)
+    guard_panics("trace_scene_cycles", || {
+        parse_denoise_option(options.denoise.as_deref())?;
+        let mut session = CyclesSession::create(&input)?;
+        let rendered = render_session_frame(&mut session, &options)?;
+        Ok(rendered.trace)
+    })
 }
 
 /// A scene kept on the GPU between frames (issue 896): the device handle, the scene tables, the acceleration structures,
@@ -510,45 +600,60 @@ pub struct NativeCyclesSession {
     session: CyclesSession,
 }
 
+impl NativeCyclesSession {
+    /// Runs one session call with panics turned into errors. A panic can leave the session half updated, so it is closed:
+    /// every later call fails with the closed-session error instead of rendering from a broken scene.
+    fn guard_session_call<Value>(
+        &mut self,
+        entry_point: &str,
+        body: impl FnOnce(&mut CyclesSession) -> Result<Value>,
+    ) -> Result<Value> {
+        guard_target_call(&mut self.session, entry_point, body, |session| session.close())
+    }
+}
+
 #[napi]
 impl NativeCyclesSession {
     #[napi(constructor)]
     pub fn new(input: NativeTraceInputV2) -> Result<Self> {
-        Ok(NativeCyclesSession { session: CyclesSession::create(&input)? })
+        let session = guard_panics("NativeCyclesSession", || CyclesSession::create(&input))?;
+        Ok(NativeCyclesSession { session })
     }
 
     /// Renders one frame of the session's scene. `options.kernelParams` may bring another camera or render settings of the same scene.
     #[napi]
     pub fn render(&mut self, options: NativeCyclesTraceOptions) -> Result<NativeSessionRenderResult> {
-        render_session_frame(&mut self.session, &options)
+        self.guard_session_call("render", |session| render_session_frame(session, &options))
     }
 
     /// Starts the progressive image over: clears the film, keeps the scene and the pipeline.
     #[napi]
     pub fn reset(&mut self) -> Result<()> {
-        self.session.reset()
+        self.guard_session_call("reset", |session| session.reset())
     }
 
     /// The film as it stands (the average of every sample drawn so far), without tracing.
     #[napi]
     pub fn resolve(&mut self, options: NativeSessionResolveOptions) -> Result<NativeSessionRenderResult> {
-        resolve_session_film(&mut self.session, &options)
+        self.guard_session_call("resolve", |session| resolve_session_film(session, &options))
     }
 
     /// Replaces the values of scene tables (materials, lights, emission, instance transforms) without rebuilding the
     /// pipeline or the BLAS. Clears the film.
     #[napi]
     pub fn update(&mut self, options: NativeSessionUpdateOptions) -> Result<NativeSessionUpdateReport> {
-        let update = CyclesSceneUpdate { kernel_params: &options.kernel_params, tables: update_tables(&options) };
-        let report = self.session.update(&update)?;
-        Ok(NativeSessionUpdateReport {
-            uploaded_tables: report.uploaded_tables.iter().map(|name| name.to_string()).collect(),
-            acceleration_rebuilt: report.acceleration_rebuilt,
-            changed_instances: report.changed_instances,
-            kernel_respecialized: report.kernel_respecialized,
-            upload_seconds: report.upload_seconds,
-            acceleration_rebuild_seconds: report.acceleration_rebuild_seconds,
-            update_seconds: report.update_seconds,
+        self.guard_session_call("update", |session| {
+            let update = CyclesSceneUpdate { kernel_params: &options.kernel_params, tables: update_tables(&options) };
+            let report = session.update(&update)?;
+            Ok(NativeSessionUpdateReport {
+                uploaded_tables: report.uploaded_tables.iter().map(|name| name.to_string()).collect(),
+                acceleration_rebuilt: report.acceleration_rebuilt,
+                changed_instances: report.changed_instances,
+                kernel_respecialized: report.kernel_respecialized,
+                upload_seconds: report.upload_seconds,
+                acceleration_rebuild_seconds: report.acceleration_rebuild_seconds,
+                update_seconds: report.update_seconds,
+            })
         })
     }
 
@@ -562,43 +667,47 @@ impl NativeCyclesSession {
 /// Filters a traced image with the edge-avoiding a-trous wavelet filter on the GPU (spatial only; the result is biased).
 #[napi]
 pub fn denoise_atrous(options: DenoiseAtrousOptions) -> Result<DenoiseAtrousResult> {
-    let context = get_cycles_device_context()?;
-    let output = atrous_denoise(
-        &context.device,
-        &context.queue,
-        &DenoiseInput {
-            width: options.width,
-            height: options.height,
-            rgba: &options.rgba,
-            albedo: &options.albedo,
-            normal: &options.normal,
-            depth: &options.depth,
-            variance: &options.variance,
-        },
-        &DeviceHealth {
-            device_lost: &context.device_lost,
-            device_error: &context.device_error,
-            uncaptured_error: &context.uncaptured_error,
-        },
-    )?;
-    Ok(DenoiseAtrousResult {
-        rgba: Float32Array::new(output.rgba),
-        compile_seconds: output.compile_seconds,
-        upload_seconds: output.upload_seconds,
-        gpu_seconds: output.gpu_seconds,
-        readback_seconds: output.readback_seconds,
+    guard_panics("denoise_atrous", || {
+        let context = get_cycles_device_context()?;
+        let output = atrous_denoise(
+            &context.device,
+            &context.queue,
+            &DenoiseInput {
+                width: options.width,
+                height: options.height,
+                rgba: &options.rgba,
+                albedo: &options.albedo,
+                normal: &options.normal,
+                depth: &options.depth,
+                variance: &options.variance,
+            },
+            &DeviceHealth {
+                device_lost: &context.device_lost,
+                device_error: &context.device_error,
+                uncaptured_error: &context.uncaptured_error,
+            },
+        )?;
+        Ok(DenoiseAtrousResult {
+            rgba: Float32Array::new(output.rgba),
+            compile_seconds: output.compile_seconds,
+            upload_seconds: output.upload_seconds,
+            gpu_seconds: output.gpu_seconds,
+            readback_seconds: output.readback_seconds,
+        })
     })
 }
 
 /// Dispatches `"test_lobe_samples"` on the assembled Cycles WGSL shader and returns all 4 raw `film_accumulation` planes.
 #[napi]
 pub fn probe_cycles_lobe(options: ProbeCyclesLobeOptions) -> Result<Float32Array> {
-    let source = cycles::assemble_cycles_kernel_entry(
-        "test_lobe_samples",
-        options.bootstrap_kernel.unwrap_or(false),
-    )?;
-    let raw_planes = run_cycles_lobe_probe(&options, source)?;
-    Ok(Float32Array::new(raw_planes))
+    guard_panics("probe_cycles_lobe", || {
+        let source = cycles::assemble_cycles_kernel_entry(
+            "test_lobe_samples",
+            options.bootstrap_kernel.unwrap_or(false),
+        )?;
+        let raw_planes = run_cycles_lobe_probe(&options, source)?;
+        Ok(Float32Array::new(raw_planes))
+    })
 }
 
 /// The light that reaches each lightmap texel: `options.samples` cosine weighted paths from every texel, traced with the
@@ -606,36 +715,131 @@ pub fn probe_cycles_lobe(options: ProbeCyclesLobeOptions) -> Result<Float32Array
 /// sample count words are the ones `buildNativeTexelInput` writes.
 #[napi]
 pub fn trace_texels(input: NativeTraceInput, texels: NativeTexels, options: NativeTexelOptions) -> Result<NativeTexelResult> {
-    let count = texels.count as usize;
-    if count == 0 || texels.points.len() < count * 3 || texels.normals.len() < count * 3 {
-        return Err(failure("The texel points and normals must hold three floats for each of `count` texels."));
-    }
-    let accumulation_bytes = texel_accumulation_bytes(count);
-    let prepared = prepare_scene(
-        &input,
-        JobShape {
-            source: format!("{KERNEL_SOURCE}\n{TEXEL_SOURCE}"),
-            entry_point: "bakeTexels",
-            rewrite_specialization_flags: true,
-            accumulation_bytes,
-            extra_buffers: vec![
-                ("texel points", pad_texel_vectors(&texels.points, count)),
-                ("texel normals", pad_texel_vectors(&texels.normals, count)),
-            ],
-        },
-    )?;
-    let groups = texel_workgroups(count as u32);
-    let (sums, traced_seconds) = trace_samples(&prepared, options.samples, groups, accumulation_bytes, options.max_seconds)?;
-    let resolved = resolve_texels(&sums, count, options.samples);
-    Ok(NativeTexelResult {
-        radiance: Float32Array::new(resolved.radiance),
-        escaped: Float32Array::new(resolved.escaped),
-        adapter: prepared.adapter_name,
-        backend: prepared.backend_name,
-        setup_seconds: prepared.setup_seconds,
-        compile_seconds: prepared.compile_seconds,
-        upload_seconds: prepared.upload_seconds,
-        acceleration_build_seconds: prepared.acceleration_build_seconds,
-        traced_seconds,
+    guard_panics("trace_texels", || {
+        let count = texels.count as usize;
+        if count == 0 || texels.points.len() < count * 3 || texels.normals.len() < count * 3 {
+            return Err(failure("The texel points and normals must hold three floats for each of `count` texels."));
+        }
+        let accumulation_bytes = texel_accumulation_bytes(count);
+        let prepared = prepare_scene(
+            &input,
+            JobShape {
+                source: format!("{KERNEL_SOURCE}\n{TEXEL_SOURCE}"),
+                entry_point: "bakeTexels",
+                rewrite_specialization_flags: true,
+                accumulation_bytes,
+                extra_buffers: vec![
+                    ("texel points", pad_texel_vectors(&texels.points, count)),
+                    ("texel normals", pad_texel_vectors(&texels.normals, count)),
+                ],
+            },
+        )?;
+        let groups = texel_workgroups(count as u32);
+        let (sums, traced_seconds) = trace_samples(&prepared, options.samples, groups, accumulation_bytes, options.max_seconds)?;
+        let resolved = resolve_texels(&sums, count, options.samples);
+        Ok(NativeTexelResult {
+            radiance: Float32Array::new(resolved.radiance),
+            escaped: Float32Array::new(resolved.escaped),
+            adapter: prepared.adapter_name,
+            backend: prepared.backend_name,
+            setup_seconds: prepared.setup_seconds,
+            compile_seconds: prepared.compile_seconds,
+            upload_seconds: prepared.upload_seconds,
+            acceleration_build_seconds: prepared.acceleration_build_seconds,
+            traced_seconds,
+        })
     })
+}
+
+#[cfg(test)]
+mod panic_guard_tests {
+    use super::*;
+
+    fn panicking_with_text() -> Result<u32> {
+        panic!("static text");
+    }
+
+    #[test]
+    fn a_panic_with_a_str_message_becomes_an_error_that_names_the_entry_point() {
+        let error = guard_panics_then("trace_scene", panicking_with_text, || {}).unwrap_err();
+        assert!(error.reason.contains("trace_scene"), "{}", error.reason);
+        assert!(error.reason.contains("static text"), "{}", error.reason);
+    }
+
+    #[test]
+    fn a_panic_with_a_string_message_keeps_the_message() {
+        let error = guard_panics_then("denoise_atrous", || -> Result<u32> { panic!("{} lights", 3) }, || {}).unwrap_err();
+        assert!(error.reason.contains("denoise_atrous"), "{}", error.reason);
+        assert!(error.reason.contains("3 lights"), "{}", error.reason);
+    }
+
+    #[test]
+    fn a_panic_with_another_payload_falls_back_to_no_message() {
+        let error = guard_panics_then(
+            "trace_texels",
+            || -> Result<u32> { std::panic::panic_any(42_u32) },
+            || {},
+        )
+        .unwrap_err();
+        assert!(error.reason.contains("trace_texels"), "{}", error.reason);
+        assert!(error.reason.contains("no message"), "{}", error.reason);
+    }
+
+    #[test]
+    fn a_successful_call_passes_through_and_skips_the_cleanup() {
+        let mut cleanup_ran = false;
+        let outcome = guard_panics_then("trace_scene", || Ok(7_u32), || cleanup_ran = true);
+        assert_eq!(outcome.unwrap(), 7);
+        assert!(!cleanup_ran);
+    }
+
+    #[test]
+    fn an_error_returned_without_a_panic_is_kept_and_skips_the_cleanup() {
+        let mut cleanup_ran = false;
+        let error = guard_panics_then("trace_scene", || -> Result<u32> { Err(failure("bad input")) }, || cleanup_ran = true)
+            .unwrap_err();
+        assert_eq!(error.reason, "bad input");
+        assert!(!cleanup_ran);
+    }
+
+    #[test]
+    fn a_panic_runs_the_cleanup_and_a_panicking_cleanup_does_not_hide_the_error() {
+        let error = guard_panics_then("trace_scene", panicking_with_text, || panic!("cleanup failed")).unwrap_err();
+        assert!(error.reason.contains("static text"), "{}", error.reason);
+    }
+
+    struct FakeSession {
+        closed: bool,
+    }
+
+    #[test]
+    fn a_panic_in_a_target_call_closes_the_target_and_names_the_entry_point() {
+        let mut session = FakeSession { closed: false };
+        let error = guard_target_call(
+            &mut session,
+            "render",
+            |_| -> Result<u32> { panic!("device lost mid frame") },
+            |target| target.closed = true,
+        )
+        .unwrap_err();
+        assert!(session.closed);
+        assert!(error.reason.contains("render"), "{}", error.reason);
+        assert!(error.reason.contains("device lost mid frame"), "{}", error.reason);
+    }
+
+    #[test]
+    fn a_target_call_that_succeeds_or_fails_normally_leaves_the_target_open() {
+        let mut session = FakeSession { closed: false };
+        let value = guard_target_call(&mut session, "reset", |_| Ok(5_u32), |target| target.closed = true).unwrap();
+        assert_eq!(value, 5);
+        let error = guard_target_call(
+            &mut session,
+            "reset",
+            |_| -> Result<u32> { Err(failure("bad options")) },
+            |target| target.closed = true,
+        )
+        .unwrap_err();
+        assert_eq!(error.reason, "bad options");
+        assert!(!session.closed);
+    }
 }

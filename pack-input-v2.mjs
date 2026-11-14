@@ -21,7 +21,7 @@ export const INVALID_INDEX_V2 = 0xffffffff;
 // before it render differently or fail on the host (a field changes meaning, a table gains required content, a flag changes
 // its default). A change that old inputs still render correctly under does not bump it. The pack file, the engine
 // description (`describeEngine().packFormat`) and the host's revision check all read this one constant.
-export const PACK_REVISION = 1;
+export const PACK_REVISION = 2;
 
 // Byte offset of `filter_glossy` inside a `KernelParamsV2` buffer (u32[75] * 4 = 300).
 // Used in `packKernelParamsV2` and in `index.mjs` when patching a pre-built buffer.
@@ -38,7 +38,7 @@ export const VALID_LIGHT_SAMPLING = Object.freeze(['auto', 'tree', 'uniform']);
 export const LIGHT_TREE_AUTO_MIN_EMITTERS = 1;
 
 export const STRUCT_STRIDES_V2 = Object.freeze({
-  kernelParams: 320,
+  kernelParams: 336,
   instance: 160,
   triangle: 224,
   material: 256,
@@ -54,6 +54,8 @@ export const KERNEL_FLAG_LIGHT_TREE_PROBE = 128;
 const KERNEL_FLAG_TEST_NEE_ONLY = 256;
 const KERNEL_FLAG_TEST_BSDF_ONLY = 512;
 export const VALID_DIRECT_LIGHTING = Object.freeze(['both', 'nee-only', 'bsdf-only']);
+/** `shadowRayPick` values: "all" traces a shadow ray per light sample (default), "contribution" traces one per vertex (see `KERNEL_FLAG_SHADOW_RAY_PICK` in abi.wgsl). */
+export const VALID_SHADOW_RAY_PICK = Object.freeze(['all', 'contribution']);
 const KERNEL_FLAG_HAS_VOLUME = 2;
 const KERNEL_FLAG_HAS_SUBSURFACE = 4;
 const KERNEL_FLAG_ORTHOGRAPHIC_CAMERA = 8;
@@ -63,6 +65,7 @@ export const KERNEL_FLAG_WHITE_NOISE_SAMPLER = 64;
 export const KERNEL_FLAG_PATH_REGENERATION = 1024;
 /** Set when any texture of the pool stores mip levels; the kernel then carries a ray footprint (see FORMAT-v2.md). */
 export const KERNEL_FLAG_TEXTURE_MIPS = 2048;
+export const KERNEL_FLAG_SHADOW_RAY_PICK = 4096;
 
 /** `flags` of a material extension record: the diffuse transmission colour multiplies the base colour. */
 const MATERIAL_EXTENSION_FLAG_TINTS_BASE_COLOR = 1;
@@ -145,6 +148,47 @@ export function resolveHdriRadianceLimit(hdriRadianceLimit, callerName) {
   return hdriRadianceLimit;
 }
 export const SUN_DEFAULT_HALF_ANGLE = Math.PI / 360;
+// Below this the f32 cosine of the half angle rounds to exactly 1.0 (about 2.44e-4 rad), the kernel can no
+// longer tell a cone from a delta light and the radiance color / (pi sin^2) overcounts by about 1 / solid angle.
+// It is also the smallest radius Crucible accepts.
+const SUN_MIN_NONZERO_HALF_ANGLE = 5e-4;
+const SUN_MAX_HALF_ANGLE = Math.PI / 2;
+
+// A v1 pack stores only the cosine, so a nonzero radius under the minimum is f32 rounding noise: lift it.
+function resolveReconstructedSunRadius(radius) {
+  return radius > 0 && radius < SUN_MIN_NONZERO_HALF_ANGLE ? SUN_MIN_NONZERO_HALF_ANGLE : Math.min(radius, SUN_MAX_HALF_ANGLE);
+}
+
+function resolveSunHalfAngle(angularRadius) {
+  if (angularRadius === undefined) {
+    return SUN_DEFAULT_HALF_ANGLE;
+  }
+  const halfAngle = Number(angularRadius);
+  const withinRange = halfAngle === 0 || (halfAngle >= SUN_MIN_NONZERO_HALF_ANGLE && halfAngle <= SUN_MAX_HALF_ANGLE);
+  if (!Number.isFinite(halfAngle) || !withinRange) {
+    throw new RangeError(
+      `lights.sun.angularRadius must be 0 (a delta sun) or a finite angle in radians from ${SUN_MIN_NONZERO_HALF_ANGLE} to ${SUN_MAX_HALF_ANGLE}, got ${String(angularRadius)}. ` +
+      `Pass 0.00465 for the real sun, or 0 for a point-like sun that casts hard shadows.`,
+    );
+  }
+  return halfAngle;
+}
+
+// A scalar strength, like Blender's Normal Map node. The two-value glTF form [x, y] is accepted only when
+// both values are equal, because the kernel has one strength for both tangent axes.
+function resolveNormalScale(normalScale) {
+  if (Array.isArray(normalScale) || ArrayBuffer.isView(normalScale)) {
+    const scaleX = Number(normalScale[0] ?? 1);
+    const scaleY = Number(normalScale[1] ?? 1);
+    if (!Number.isFinite(scaleX) || !Number.isFinite(scaleY) || Math.abs(scaleX) !== Math.abs(scaleY)) {
+      throw new RangeError(
+        `material.normalScale [${scaleX}, ${scaleY}] has two different strengths, but the kernel scales both tangent axes by one value. Pass a single number, or two equal numbers.`,
+      );
+    }
+    return Math.abs(scaleX);
+  }
+  return Number(normalScale ?? 1);
+}
 const IDENTITY_MATRIX_4X4 = Object.freeze([
   1, 0, 0, 0,
   0, 1, 0, 0,
@@ -464,6 +508,13 @@ export function createTextureCollector({ textureMips, texturePoolMaxBytes } = {}
       packedWords = new Uint32Array(floatBuffer);
     } else if (format === TEXTURE_FORMAT_RG16_FLOAT) {
       const halfData = data instanceof Uint16Array ? data : new Uint16Array(data);
+      const expectedHalfCount = pixelCount * 2;
+      if (halfData.length !== expectedHalfCount) {
+        throw new RangeError(
+          `A ${width}x${height} half-float texture needs ${expectedHalfCount} 16-bit values (two half-float bit patterns per texel), but \`data\` has ${halfData.length}. ` +
+          'A Uint16Array is read as half-float bits, never as 16-bit integers: pass a Float32Array of normalised values for 8-bit-per-channel-style 16-bit data, or exactly width * height * 2 half-float words.',
+        );
+      }
       const wordCount = Math.ceil(pixelCount / 1);
       const alignedWords = Math.ceil(wordCount / 4) * 4;
       packedWords = new Uint32Array(alignedWords);
@@ -833,9 +884,7 @@ export function packMaterialRecordV2(material = {}, textureCollector = null) {
   const { emissionColor, emissionStrength } = resolveEmissionFields(material);
   const subsurface = resolveSubsurfaceFields(material, baseColor);
   const diffuseTransmission = resolveDiffuseTransmission(material);
-  const normalScale = Array.isArray(material.normalScale) || ArrayBuffer.isView(material.normalScale)
-    ? 0.5 * (Math.abs(Number(material.normalScale[0] ?? 1)) + Math.abs(Number(material.normalScale[1] ?? 1)))
-    : Number(material.normalScale ?? 1);
+  const normalScale = resolveNormalScale(material.normalScale);
   const coatNormalScale = Number(material.coatNormalScale ?? 1);
   const bumpDistance = Math.max(0, Number(material.bumpDistance ?? 0));
 
@@ -1288,7 +1337,7 @@ function buildAnalyticLightEntries(lightsSection = {}) {
       const towardSun = normalizeVec3(sun.direction, [0, 1, 0]);
       const emissionDirection = [-towardSun[0], -towardSun[1], -towardSun[2]];
       const { axisU, axisV } = orthonormalBasis(emissionDirection);
-      const halfAngle = Math.max(0, Number(sun.angularRadius ?? SUN_DEFAULT_HALF_ANGLE));
+      const halfAngle = resolveSunHalfAngle(sun.angularRadius);
       const cosHalfAngle = Math.cos(halfAngle);
       const sinHalfAngle = Math.sin(halfAngle);
       const discFactor = sinHalfAngle > 1e-7 ? Math.PI * sinHalfAngle * sinHalfAngle : 1;
@@ -1750,7 +1799,70 @@ function sanitizeEnvironmentChannel(value, limit) {
   return Math.min(limit, number);
 }
 
-function packEnvironmentTexelsV2(environment, options = {}) {
+/** The largest power of two that is at most `count` (a count of 1 or more). */
+function largestPowerOfTwoAtMost(count) {
+  let power = 1;
+  while (power * 2 <= count) {
+    power *= 2;
+  }
+  return power;
+}
+
+/**
+ * Writes the guide of one cumulative table into the `z` channel of its entries: `bucketCount` (the largest power of two at most
+ * `count`) buckets of equal probability, entry `bucket` holding the first table index whose cumulative value is above
+ * `bucket / bucketCount`. A pick `u` in `[bucket / bucketCount, (bucket + 1) / bucketCount)` then lies between the guide of its
+ * bucket and the guide of the next, so the kernel searches a few entries instead of the whole table and finds the same index
+ * as a search of the whole table would. A bucket start is exact in float32, so the kernel compares the same numbers.
+ */
+function writeEnvironmentGuide(texels, firstEntry, count) {
+  const bucketCount = largestPowerOfTwoAtMost(count);
+  let guideIndex = 0;
+  for (let bucket = 0; bucket < bucketCount; bucket++) {
+    const bucketStart = bucket / bucketCount;
+    while (guideIndex < count - 1 && texels[(firstEntry + guideIndex) * 4] <= bucketStart) {
+      guideIndex += 1;
+    }
+    texels[(firstEntry + bucket) * 4 + 2] = guideIndex;
+  }
+}
+
+/**
+ * The importance of each texel, from the radiance the kernel reads: `lgt_eval_hdri_texel` filters the map bilinearly, so the
+ * light a texel's footprint carries is the integral of that reconstruction, not the value at its centre. The footprint is four
+ * quarter-texels, and the bilinear integral over one is the mean of its four corner texels, so the integral over the whole
+ * footprint is the luminance filtered with [1 2 1; 2 4 2; 1 2 1] / 16. Columns wrap around and rows clamp, as the kernel's
+ * lookup does, so the skirt of a sun gets weight in the texels it spills into. The sum over the map is unchanged.
+ */
+function filterLuminanceLikeBilinearLookup(readRowLuminance, filteredOutput, width, height) {
+  // Only three rows of luminance are alive at once, so the extra memory is three rows, not a second copy of the map.
+  const tapWeights = [1, 2, 1];
+  const rowBuffers = [new Float64Array(width), new Float64Array(width), new Float64Array(width)];
+  const loadedRowIndices = [-1, -1, -1];
+  const rowAt = (rowIndex) => {
+    const slot = rowIndex % 3;
+    if (loadedRowIndices[slot] !== rowIndex) {
+      readRowLuminance(rowIndex, rowBuffers[slot]);
+      loadedRowIndices[slot] = rowIndex;
+    }
+    return rowBuffers[slot];
+  };
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let sum = 0;
+      for (let rowOffset = -1; rowOffset <= 1; rowOffset++) {
+        const row = rowAt(Math.min(height - 1, Math.max(0, y + rowOffset)));
+        for (let columnOffset = -1; columnOffset <= 1; columnOffset++) {
+          const column = (x + columnOffset + width) % width;
+          sum += row[column] * tapWeights[rowOffset + 1] * tapWeights[columnOffset + 1];
+        }
+      }
+      filteredOutput[y * width + x] = sum / 16;
+    }
+  }
+}
+
+export function packEnvironmentTexelsV2(environment, options = {}) {
   if (!environment || !(environment.width > 0 && environment.height > 0)) {
     const bg = options.backgroundColor ?? [0, 0, 0];
     return {
@@ -1788,6 +1900,17 @@ function packEnvironmentTexelsV2(environment, options = {}) {
   const deltaPhi = (2 * Math.PI) / width;
   const deltaTheta = Math.PI / height;
   let totalWeight = 0;
+  const readRowLuminance = (rowIndex, rowOutput) => {
+    for (let x = 0; x < width; x++) {
+      const srcBase = (rowIndex * width + x) * channels;
+      const r = sanitizeEnvironmentChannel(source[srcBase], channelLimit);
+      const g = sanitizeEnvironmentChannel(source[srcBase + 1], channelLimit);
+      const b = sanitizeEnvironmentChannel(source[srcBase + 2], channelLimit);
+      rowOutput[x] = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    }
+  };
+  // pixelWeights first holds the filtered luminance and is turned into weights in place below.
+  filterLuminanceLikeBilinearLookup(readRowLuminance, pixelWeights, width, height);
 
   for (let y = 0; y < height; y++) {
     const sinTheta = Math.sin(Math.PI * (y + 0.5) / height);
@@ -1804,7 +1927,7 @@ function packEnvironmentTexelsV2(environment, options = {}) {
       texels[dstBase + 2] = b;
       texels[dstBase + 3] = 1.0;
 
-      const weight = (0.2126 * r + 0.7152 * g + 0.0722 * b) * intensity * sinTheta * deltaPhi * deltaTheta;
+      const weight = pixelWeights[pixelIndex] * intensity * sinTheta * deltaPhi * deltaTheta;
       pixelWeights[pixelIndex] = weight;
       rowSum += weight;
     }
@@ -1839,7 +1962,9 @@ function packEnvironmentTexelsV2(environment, options = {}) {
       texels[condBase + 2] = 0.0;
       texels[condBase + 3] = 0.0;
     }
+    writeEnvironmentGuide(texels, envCdfOffset + height + y * width, width);
   }
+  writeEnvironmentGuide(texels, envCdfOffset, height);
 
   const envColor = options.envColor ?? [intensity, intensity, intensity];
   return {
@@ -2033,6 +2158,15 @@ function requireFiniteNumberOption(value, name, callerName, isAccepted, expectat
   }
 }
 
+/** Throws unless `shadowRayPick` is undefined, "all" or "contribution". */
+export function validateShadowRayPickOption(shadowRayPick, callerName) {
+  if (shadowRayPick !== undefined && !VALID_SHADOW_RAY_PICK.includes(shadowRayPick)) {
+    throw new RangeError(
+      `${callerName}: \`shadowRayPick\` must be "all" (default, a shadow ray for each light sample) or "contribution" (one shadow ray per vertex), got ${JSON.stringify(shadowRayPick)}.`
+    );
+  }
+}
+
 export function validatePackOptions(options, callerName, requireDimensionsAndSamples = false) {
   if (!options || typeof options !== 'object') {
     throw new TypeError(`${callerName}: \`options\` must be an object.`);
@@ -2053,6 +2187,7 @@ export function validatePackOptions(options, callerName, requireDimensionsAndSam
   validateDispatchBudgetMs(options.dispatchBudgetMs, callerName);
   resolveSamplingOptions(options, callerName);
   resolveEnvCompensationFraction(options.envCompensation, callerName);
+  validateShadowRayPickOption(options.shadowRayPick, callerName);
   validateDenoiseOption(options.denoise, callerName);
   validateTextureMipsOption(options.textureMips, 'textureMips', callerName);
   validateFilterOptions(options, callerName);
@@ -2087,6 +2222,11 @@ export function validatePackOptions(options, callerName, requireDimensionsAndSam
 }
 
 export const MAX_APERTURE_BLADES = 64;
+export const MIN_APERTURE_RATIO = 0.01;
+export const MAX_APERTURE_RATIO = 100;
+// Byte offset of `aperture_ratio` inside a `KernelParamsV2` buffer (f32[80] * 4 = 320).
+const KERNEL_PARAMS_V2_APERTURE_RATIO_BYTE_OFFSET = 320;
+const KERNEL_PARAMS_V2_APERTURE_RATIO_WORD_INDEX = KERNEL_PARAMS_V2_APERTURE_RATIO_BYTE_OFFSET / 4;
 
 /** The thin lens a v1 params block carries (see THIN_LENS_FLOAT_INDEXES in pack-input.mjs); nothing for a pinhole, so its bytes stay as they were. */
 function readV1ThinLens(paramF32) {
@@ -2106,7 +2246,8 @@ function requireThinLensNumber(value, name, callerName, isValid, expectation) {
 /**
  * The thin lens of a camera, from the camera object (as `createCamera` returns it for a camera with an `fStop`) or from the
  * same names in `options`: `apertureRadius` (scene units, 0 is a pinhole), `focalDistance` (along the view axis),
- * `apertureBlades` (0 for a round aperture, else 3 to 64) and `apertureRotation` (radians). A pinhole keeps the defaults
+ * `apertureBlades` (0 for a round aperture, else 3 to 64), `apertureRotation` (radians) and `apertureRatio` (anamorphic bokeh,
+ * width over height of the aperture, from 0.01 to 100, default 1 for a round or regular one; Cycles `aperture_ratio`). A pinhole keeps the defaults
  * the params block always held, so its bytes do not change. Throws a RangeError that says what to pass.
  */
 export function resolveThinLensParameters(camera, options, callerName) {
@@ -2122,7 +2263,11 @@ export function resolveThinLensParameters(camera, options, callerName) {
     `0 for a round aperture or a whole number from 3 to ${MAX_APERTURE_BLADES}`);
   const apertureRotation = camera?.apertureRotation ?? options.apertureRotation ?? 0;
   requireThinLensNumber(apertureRotation, 'apertureRotation', callerName, () => true, 'a finite number of radians');
-  return { apertureRadius, focalDistance, apertureBlades, apertureRotation };
+  const apertureRatio = camera?.apertureRatio ?? options.apertureRatio ?? 1;
+  requireThinLensNumber(apertureRatio, 'apertureRatio', callerName,
+    value => value >= MIN_APERTURE_RATIO && value <= MAX_APERTURE_RATIO,
+    `the width over height of the aperture, from ${MIN_APERTURE_RATIO} to ${MAX_APERTURE_RATIO} (1 is a round or regular aperture, 2 stretches the bokeh to twice as wide as tall)`);
+  return { apertureRadius, focalDistance, apertureBlades, apertureRotation, apertureRatio };
 }
 
 function effectiveCyclesClamp(value) {
@@ -2184,7 +2329,7 @@ function isOrthographicCamera(camera, options, heldOrthographic = false) {
   return heldOrthographic;
 }
 
-const THIN_LENS_FIELD_NAMES = ['apertureRadius', 'focalDistance', 'apertureBlades', 'apertureRotation'];
+const THIN_LENS_FIELD_NAMES = ['apertureRadius', 'focalDistance', 'apertureBlades', 'apertureRotation', 'apertureRatio'];
 
 // The options of the thin lens: those the caller gave, else the ones the block already holds.
 function thinLensOptionsWithHeld(options, heldThinLens) {
@@ -2249,6 +2394,7 @@ function writeCameraWordsV2(f32, u32, cameraWords) {
   f32[45] = Number(lensShift[1] ?? 0);
   u32[46] = thinLens.apertureBlades >>> 0;
   f32[47] = thinLens.apertureRotation;
+  f32[KERNEL_PARAMS_V2_APERTURE_RATIO_WORD_INDEX] = thinLens.apertureRatio;
 }
 
 const KERNEL_PARAMS_V2_SEED_BYTE_OFFSET = 28;
@@ -2274,6 +2420,7 @@ function readHeldCameraWords(view) {
       focalDistance: wordAt(43),
       apertureBlades: view.getUint32(46 * 4, true),
       apertureRotation: wordAt(47),
+      apertureRatio: wordAt(KERNEL_PARAMS_V2_APERTURE_RATIO_WORD_INDEX),
     },
   };
 }
@@ -2371,6 +2518,10 @@ export function packCameraParams(kernelParams, camera, options = {}) {
     new Uint8Array(scratchWords, KERNEL_PARAMS_V2_CAMERA_FIRST_BYTE_OFFSET, KERNEL_PARAMS_V2_CAMERA_BYTE_LENGTH),
     KERNEL_PARAMS_V2_CAMERA_FIRST_BYTE_OFFSET
   );
+  patchedParams.set(
+    new Uint8Array(scratchWords, KERNEL_PARAMS_V2_APERTURE_RATIO_BYTE_OFFSET, 4),
+    KERNEL_PARAMS_V2_APERTURE_RATIO_BYTE_OFFSET
+  );
 
   const heldOrthographic = (flags & KERNEL_FLAG_ORTHOGRAPHIC_CAMERA) !== 0;
   const patchedFlags = isOrthographicCamera(camera, options, heldOrthographic)
@@ -2388,6 +2539,24 @@ function resolveSurfaceOffset(surfaceOffset, rayEpsilon) {
   const name = surfaceOffset === undefined ? 'rayEpsilon' : 'scene.surfaceOffset';
   requireFiniteNumberOption(value, name, 'buildNativeInputV2', number => number > 0, 'greater than 0');
   return value;
+}
+
+/**
+ * The fog albedo as three floats in [0, 1], the range of a single-scatter albedo. The kernel multiplies the path throughput by it
+ * at every scatter, so a value above 1 would add energy and a NaN would poison the pixel. A missing, short, non-numeric or
+ * non-finite component throws; a finite one outside [0, 1] is clamped. Math.max keeps NaN, so finiteness is checked first.
+ */
+export function resolveVolumeAlbedo(albedo, callerName) {
+  const source = albedo ?? [1, 1, 1];
+  const resolved = [];
+  for (let channel = 0; channel < 3; channel += 1) {
+    const component = source[channel];
+    if (typeof component !== 'number' || !Number.isFinite(component)) {
+      throw new RangeError(`${callerName}: \`volume.albedo\` needs three finite numbers [r, g, b] in [0, 1]; component ${channel} is ${component === undefined ? 'missing' : JSON.stringify(component)}.`);
+    }
+    resolved.push(Math.min(1, Math.max(0, component)));
+  }
+  return resolved;
 }
 
 function packKernelParamsV2({
@@ -2452,6 +2621,10 @@ function packKernelParamsV2({
   if (counts.usesTextureMips === true) {
     kernelFlags |= KERNEL_FLAG_TEXTURE_MIPS;
   }
+  validateShadowRayPickOption(options.shadowRayPick, 'packKernelParamsV2');
+  if (options.shadowRayPick === 'contribution') {
+    kernelFlags |= KERNEL_FLAG_SHADOW_RAY_PICK;
+  }
 
   const maxBounces = Math.max(0, Math.round(Number(options.bounces ?? options.maxBounces ?? 8)));
   const maxDiffuseBounces = Math.max(0, Math.round(Number(options.diffuseBounces ?? maxBounces)));
@@ -2513,7 +2686,7 @@ function packKernelParamsV2({
 
   const volMin = volume?.minimum ?? [0, 0, 0];
   const volMax = volume?.maximum ?? [0, 0, 0];
-  const volAlbedo = volume?.albedo ?? [1, 1, 1];
+  const volAlbedo = resolveVolumeAlbedo(volume?.albedo, 'packKernelParamsV2');
   f32[56] = Number(volMin[0]);
   f32[57] = Number(volMin[1]);
   f32[58] = Number(volMin[2]);
@@ -2524,9 +2697,9 @@ function packKernelParamsV2({
   f32[62] = Number(volMax[2]);
   f32[63] = Math.max(-0.99, Math.min(0.99, Number(volume?.anisotropy ?? 0)));
 
-  f32[64] = Number(volAlbedo[0]);
-  f32[65] = Number(volAlbedo[1]);
-  f32[66] = Number(volAlbedo[2]);
+  f32[64] = volAlbedo[0];
+  f32[65] = volAlbedo[1];
+  f32[66] = volAlbedo[2];
   f32[67] = emissiveTotalWeight;
 
   f32[68] = analyticLightTotalWeight;
@@ -3286,7 +3459,8 @@ export function reduceV1MaterialTable({ materials: matSource, atlas: atlasWords,
     const clearcoatRoughness = matSource[base + 9];
     const transmission = matSource[base + 10];
     const ior = matSource[base + 11] > 0 ? matSource[base + 11] : 1.5;
-    const normalScale = [matSource[base + 12] || 1, matSource[base + 13] || 1];
+    // A v1 pack may hold two different axis strengths; the upgrade keeps the old mean of the two.
+    const normalScale = 0.5 * (Math.abs(matSource[base + 12] || 1) + Math.abs(matSource[base + 13] || 1));
     const alphaCutoff = matSource[base + 14];
     const maskLo = ((Math.round(matSource[base + 15]) & 0xffff) | ((Math.round(matSource[base + 16]) & 0xffff) << 16)) >>> 0;
     materialLightMasks.push(maskLo);
@@ -3536,7 +3710,7 @@ export function upgradeNativeInputV1ToV2(v1Input, options = {}, carriedFields = 
       bit: 0,
       direction: [paramF32[16], paramF32[17], paramF32[18]],
       color: [paramF32[20], paramF32[21], paramF32[22]],
-      angularRadius: Math.acos(cosSun),
+      angularRadius: resolveReconstructedSunRadius(Math.acos(cosSun)),
     };
   }
   const lightFloats = v1Input.lights;

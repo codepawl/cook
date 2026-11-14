@@ -44,11 +44,22 @@ fn cam_sample_regular_polygon(blades: u32, rotation: f32, rand_uv: vec2<f32>) ->
   return weight_a * vertex_0 + weight_b * vertex_1;
 }
 
+// Cycles scales the sample's x by 1 / aperture_ratio after the disk or polygon draw. A zero word (a block packed without
+// the field) means a ratio of 1, so x is multiplied by exactly 1.0 and the sample is unchanged.
+fn cam_inverse_aperture_ratio() -> f32 {
+  let ratio = kernel_params.aperture_ratio;
+  return select(1.0, 1.0 / ratio, ratio > 0.0);
+}
+
 fn cam_sample_aperture(rand_uv: vec2<f32>) -> vec2<f32> {
+  var sample_on_lens: vec2<f32>;
   if (kernel_params.aperture_blades >= 3u) {
-    return cam_sample_regular_polygon(kernel_params.aperture_blades, kernel_params.aperture_rotation, rand_uv);
+    sample_on_lens = cam_sample_regular_polygon(kernel_params.aperture_blades, kernel_params.aperture_rotation, rand_uv);
+  } else {
+    sample_on_lens = cam_sample_uniform_disk(rand_uv);
   }
-  return cam_sample_uniform_disk(rand_uv);
+  sample_on_lens.x = sample_on_lens.x * cam_inverse_aperture_ratio();
+  return sample_on_lens;
 }
 
 fn cam_safe_unit_axis(axis: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
