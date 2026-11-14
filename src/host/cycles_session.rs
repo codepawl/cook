@@ -488,6 +488,7 @@ impl CyclesSession {
             accumulation: &film.accumulation,
             device_lost: &context.device_lost,
             device_error: &context.device_error,
+            uncaptured_error: &context.uncaptured_error,
         };
         let plan = match request.dispatch_budget_ms {
             Some(budget_ms) => choose_tile_budget_plan(budget_ms, request),

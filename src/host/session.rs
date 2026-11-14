@@ -360,6 +360,7 @@ pub(crate) struct PreparedScene {
     pub(crate) bind_group: wgpu::BindGroup,
     pub(crate) accumulation: wgpu::Buffer,
     pub(crate) parameters: wgpu::Buffer,
+    pub(crate) uncaptured_error: Arc<Mutex<Option<String>>>,
     pub(crate) adapter_name: String,
     pub(crate) backend_name: String,
     pub(crate) features: String,
@@ -382,6 +383,7 @@ pub(crate) struct CyclesDispatchTarget<'a> {
     pub(crate) accumulation: &'a wgpu::Buffer,
     pub(crate) device_lost: &'a AtomicBool,
     pub(crate) device_error: &'a Mutex<String>,
+    pub(crate) uncaptured_error: &'a Mutex<Option<String>>,
 }
 
 /// What one kind of job adds to the shared scene setup: the kernel text, its entry point, the accumulation size and the
@@ -642,6 +644,7 @@ pub(crate) fn prepare_scene(input: &NativeTraceInput, shape: JobShape) -> Result
         bind_group,
         accumulation: uploaded.accumulation,
         parameters: uploaded.parameters,
+        uncaptured_error: cached_device_reports()?.uncaptured_error,
         adapter_name,
         backend_name,
         features,
@@ -666,6 +669,8 @@ pub(crate) fn trace_samples(
     let trace_started = Instant::now();
     let device = &prepared.device;
     let queue = &prepared.queue;
+    // An error reported before this trace belongs to an earlier job.
+    let _ = take_uncaptured_error(&prepared.uncaptured_error);
     for sample_index in 0..samples {
         queue.write_buffer(&prepared.parameters, SAMPLE_INDEX_BYTE_OFFSET, &sample_index.to_le_bytes());
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -683,6 +688,7 @@ pub(crate) fn trace_samples(
         queue.submit(Some(encoder.finish()));
         if (sample_index + 1) % SAMPLES_PER_WAIT == 0 {
             let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            fail_if_gpu_rejected_render(&prepared.uncaptured_error)?;
             if let Some(limit) = max_seconds {
                 if trace_started.elapsed().as_secs_f64() > limit {
                     return Err(failure(format!(
@@ -693,7 +699,9 @@ pub(crate) fn trace_samples(
             }
         }
     }
-    let sums = read_accumulation(device, queue, &prepared.accumulation, accumulation_bytes)?;
+    let sums = read_accumulation(device, queue, &prepared.accumulation, accumulation_bytes);
+    fail_if_gpu_rejected_render(&prepared.uncaptured_error)?;
+    let sums = sums?;
     Ok((sums, trace_started.elapsed().as_secs_f64()))
 }
 
@@ -871,6 +879,33 @@ pub(crate) struct CyclesTrace {
     pub(crate) largest_tile_pixels: Option<u64>,
 }
 
+/// Takes the first error wgpu reported outside any error scope, leaving the slot empty for the next job.
+pub(crate) fn take_uncaptured_error(slot: &Mutex<Option<String>>) -> Option<String> {
+    slot.lock().ok().and_then(|mut stored| stored.take())
+}
+
+/// Stops with the stored text when the GPU rejected a dispatch or bind group of the render, instead of returning the film
+/// the rejected work left empty.
+fn fail_if_gpu_rejected_render(slot: &Mutex<Option<String>>) -> Result<()> {
+    match take_uncaptured_error(slot) {
+        Some(reported) => Err(failure(format!(
+            "The GPU rejected the render: {reported}. Lower the image size or samples and run the render again."
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Checks a finished dispatch: a lost device first, then an error the device reported outside any error scope.
+fn fail_if_dispatch_failed(
+    target: &CyclesDispatchTarget<'_>,
+    sample_offset: u32,
+    batch_samples: u32,
+    samples: u32,
+) -> Result<()> {
+    fail_if_device_lost(target, sample_offset, batch_samples, samples)?;
+    fail_if_gpu_rejected_render(target.uncaptured_error)
+}
+
 /// Raises the error for a lost device, naming the dispatch that was running and how to lower the work per dispatch.
 fn fail_if_device_lost(
     target: &CyclesDispatchTarget<'_>,
@@ -911,6 +946,8 @@ pub(crate) fn trace_cycles_samples(
     let trace_started = Instant::now();
     let device = target.device;
     let queue = target.queue;
+    // An error reported before this render belongs to an earlier job.
+    let _ = take_uncaptured_error(target.uncaptured_error);
     let mut planner = match plan {
         DispatchPlan::TimeBudget { largest_batch } => Some(DispatchPlanner::new(DISPATCH_BUDGET_SECONDS, largest_batch)),
         DispatchPlan::Fixed(_) | DispatchPlan::TileBudget { .. } => None,
@@ -955,7 +992,7 @@ pub(crate) fn trace_cycles_samples(
         };
         if should_poll {
             let _ = device.poll(wgpu::PollType::wait_indefinitely());
-            fail_if_device_lost(target, dispatch_offset, batch_samples, end_sample)?;
+            fail_if_dispatch_failed(target, dispatch_offset, batch_samples, end_sample)?;
             if let Some(planner) = planner.as_mut() {
                 let dispatch_seconds = dispatch_started.elapsed().as_secs_f64();
                 planner.record(batch_samples, dispatch_seconds);
@@ -972,7 +1009,7 @@ pub(crate) fn trace_cycles_samples(
     }
 
     let sums = read_accumulation(device, queue, target.accumulation, accumulation_bytes);
-    fail_if_device_lost(target, end_sample.saturating_sub(largest_batch), largest_batch, end_sample)?;
+    fail_if_dispatch_failed(target, end_sample.saturating_sub(largest_batch), largest_batch, end_sample)?;
     Ok(CyclesTrace {
         sums: sums?,
         traced_seconds: trace_started.elapsed().as_secs_f64(),
@@ -1008,6 +1045,7 @@ fn trace_cycles_tiles(
     let trace_started = Instant::now();
     let device = target.device;
     let queue = target.queue;
+    let _ = take_uncaptured_error(target.uncaptured_error);
     let mut planner = TileBudgetPlanner::new(budget.seconds, budget.width, budget.height, budget.largest_batch);
     let (grid_columns, grid_rows) = planner.grid();
     let end_sample = first_sample + samples;
@@ -1040,7 +1078,7 @@ fn trace_cycles_tiles(
             submit_cycles_dispatch(target, (tile.columns, tile.rows));
             let _ = device.poll(wgpu::PollType::wait_indefinitely());
             let dispatch_seconds = dispatch_started.elapsed().as_secs_f64();
-            fail_if_device_lost(target, sample_offset, batch_samples, end_sample)?;
+            fail_if_dispatch_failed(target, sample_offset, batch_samples, end_sample)?;
 
             let tile_pixels = tile.pixel_count(budget.width, budget.height);
             planner.record(tile_pixels * batch_samples as u64, dispatch_seconds);
@@ -1062,7 +1100,7 @@ fn trace_cycles_tiles(
     queue.write_buffer(target.parameters, CYCLES_TILE_ORIGIN_BYTE_OFFSET, &[0u8; 8]);
 
     let sums = read_accumulation(device, queue, target.accumulation, accumulation_bytes);
-    fail_if_device_lost(target, end_sample.saturating_sub(largest_batch), largest_batch, end_sample)?;
+    fail_if_dispatch_failed(target, end_sample.saturating_sub(largest_batch), largest_batch, end_sample)?;
     Ok(CyclesTrace {
         sums: sums?,
         traced_seconds: trace_started.elapsed().as_secs_f64(),
@@ -1260,6 +1298,17 @@ mod tests {
         store_first_error(&slot, "Validation Error: buffer too large");
         assert!(!device_lost.load(Ordering::SeqCst));
         assert!(slot.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_stored_uncaptured_error_fails_the_render_once_and_names_the_text() {
+        let slot = Mutex::new(None);
+        assert!(fail_if_gpu_rejected_render(&slot).is_ok());
+        store_first_error(&slot, "Validation Error: bind group rejected");
+        let message = fail_if_gpu_rejected_render(&slot).unwrap_err().reason;
+        assert!(message.contains("The GPU rejected the render: Validation Error: bind group rejected"), "{message}");
+        assert!(message.contains("Lower the image size or samples"), "{message}");
+        assert!(fail_if_gpu_rejected_render(&slot).is_ok(), "the slot is drained by the check");
     }
 
     #[test]

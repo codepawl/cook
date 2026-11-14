@@ -7,7 +7,7 @@ use wgpu::util::DeviceExt;
 
 use crate::host::device::{failure, layout_entry, storage_entry};
 use crate::host::film::{image_workgroups, read_accumulation};
-use crate::host::session::compile_compute_pipeline;
+use crate::host::session::{compile_compute_pipeline, take_uncaptured_error};
 
 const SHADER_SOURCE: &str = include_str!("../denoise_atrous.wgsl");
 /// The distance between the taps of each pass; the five passes cover a 61 pixel radius.
@@ -118,10 +118,6 @@ fn validate_input(input: &DenoiseInput) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn take_uncaptured_error(slot: &Mutex<Option<String>>) -> Option<String> {
-    slot.lock().ok().and_then(|mut stored| stored.take())
 }
 
 /// Stops with the stored message when the device was lost or rejected work while the filter ran, instead of reading back
