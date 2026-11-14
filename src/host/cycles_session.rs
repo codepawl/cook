@@ -14,9 +14,11 @@ use crate::cycles::{
     check_update_params_keep_scene_shape, scan_scene_specialization, specialize_kernel_source,
     trace_entry_point_for_params, SceneSpecialization,
 };
-use crate::host::accel::{build_cycles_acceleration_structure, rebuild_cycles_tlas, CyclesAcceleration, INSTANCE_RECORD_BYTES};
+use crate::host::accel::{
+    build_cycles_acceleration_structure, rebuild_cycles_tlas, tlas_instance_limit, CyclesAcceleration, INSTANCE_RECORD_BYTES,
+};
 use crate::host::cycles_update::{choose_film_use, plan_instance_update, FilmRequest, ProgressiveFilm, UpdatableTable};
-use crate::host::device::{failure, storage_buffer};
+use crate::host::device::{check_buffer_sizes_fit, failure, run_in_error_scopes, storage_buffer};
 use crate::host::film::{image_accumulation_bytes, image_workgroups, read_accumulation};
 use crate::host::session::{
     create_cycles_bind_group, get_cycles_device_context, get_or_compile_cycles_pipeline_on, pipeline_key,
@@ -291,6 +293,39 @@ pub(crate) fn choose_tile_budget_plan(budget_ms: f64, request: &CyclesRenderRequ
     }
 }
 
+/// Refuses a scene whose tables do not fit one storage buffer of the device, before anything is uploaded.
+fn check_scene_table_budget(input: &NativeTraceInputV2, limits: &wgpu::Limits) -> Result<()> {
+    let optional_bytes = |table: &Option<Uint8Array>| table.as_ref().map_or(0, |bytes| bytes.len() as u64);
+    let light_to_tree_bytes = input.light_to_tree.as_ref().map_or(0, |words| words.len() as u64 * 4);
+    let tables: [(&str, u64); 10] = [
+        ("instances", input.instances.len() as u64),
+        ("triangles", input.triangles.len() as u64),
+        ("materials", input.materials.len() as u64),
+        ("emissive triangles", input.emissive_triangles.len() as u64),
+        ("lights", input.lights.len() as u64),
+        ("light tree nodes", input.light_tree_nodes.len() as u64),
+        ("light tree emitters", optional_bytes(&input.light_tree_emitters)),
+        ("light to tree", light_to_tree_bytes),
+        ("environment", input.environment_texels.len() as u64 * 4),
+        ("texture descriptors", input.texture_descriptors.len() as u64),
+    ];
+    check_buffer_sizes_fit(&tables, limits)
+}
+
+/// Refuses an image whose film does not fit one storage buffer or whose dispatch is wider than the device allows.
+fn check_image_fits_device(width: u32, height: u32, limits: &wgpu::Limits) -> Result<()> {
+    check_buffer_sizes_fit(&[("film accumulation", image_accumulation_bytes(width, height))], limits)?;
+    let (groups_x, groups_y) = image_workgroups(width, height);
+    let maximum_groups = limits.max_compute_workgroups_per_dimension;
+    if groups_x > maximum_groups || groups_y > maximum_groups {
+        return Err(failure(format!(
+            "A {width}x{height} image needs {groups_x}x{groups_y} workgroups, but the device allows {maximum_groups} per dimension,              which is {} pixels per side. Render a smaller image.",
+            u64::from(maximum_groups) * 8
+        )));
+    }
+    Ok(())
+}
+
 fn session_closed_failure() -> napi::Error {
     failure("This native session is closed. Create a new one with createNativeSession(input) before rendering again.")
 }
@@ -311,23 +346,31 @@ impl CyclesSession {
         let context = get_cycles_device_context()?;
         let pool_limit_bytes = u64::from(context.device.limits().max_storage_buffer_binding_size);
         check_texture_pool_budget(input.texture_texels.len() as u64 * 4, pool_limit_bytes)?;
+        let device_limits = context.device.limits();
+        check_scene_table_budget(input, &device_limits)?;
         let scene_specialization = scan_scene_specialization(input);
         let setup_seconds = setup_started.elapsed().as_secs_f64();
 
         let upload_started = Instant::now();
-        let scene_tables = upload_cycles_scene_tables(&context.device, input);
-        let parameters = create_cycles_parameters(&context.device, &input.kernel_params);
+        let (scene_tables, parameters) = run_in_error_scopes(&context.device, "uploading the scene tables", || {
+            let scene_tables = upload_cycles_scene_tables(&context.device, input);
+            let parameters = create_cycles_parameters(&context.device, &input.kernel_params);
+            (scene_tables, parameters)
+        })?;
         let upload_seconds = upload_started.elapsed().as_secs_f64();
 
         let build_started = Instant::now();
-        let acceleration = build_cycles_acceleration_structure(
-            &context.device,
-            &context.queue,
-            &input.instances,
-            input.instance_count as usize,
-            &input.triangles,
-            input.triangle_count as usize,
-        )?;
+        let acceleration = run_in_error_scopes(&context.device, "building the acceleration structure", || {
+            build_cycles_acceleration_structure(
+                &context.device,
+                &context.queue,
+                &input.instances,
+                input.instance_count as usize,
+                &input.triangles,
+                input.triangle_count as usize,
+                tlas_instance_limit(&device_limits),
+            )
+        })??;
         let acceleration_build_seconds = build_started.elapsed().as_secs_f64();
 
         Ok(CyclesSession {
@@ -389,6 +432,7 @@ impl CyclesSession {
     pub(crate) fn render(&mut self, request: &CyclesRenderRequest<'_>) -> Result<CyclesRender> {
         self.fail_if_unusable()?;
         validate_render_extent(request.width, request.height, request.samples)?;
+        check_image_fits_device(request.width, request.height, &self.context.device.limits())?;
         let frame_kernel_params = self.frame_kernel_params(request.kernel_params)?;
         let film_use = choose_film_use(
             self.progressive.as_ref(),
@@ -663,18 +707,21 @@ fn ensure_film(context: &CyclesDeviceContext, gpu: &mut SessionGpuState, width: 
     if gpu.film.as_ref().is_some_and(|film| film.width == width && film.height == height) {
         return Ok(true);
     }
-    let accumulation = create_cycles_film(&context.device, image_accumulation_bytes(width, height));
-    let bind_group = with_cycles_cache_on(Some(&context.device_lost), |device, _queue, layout, lut| {
-        create_cycles_bind_group(
-            device,
-            layout,
-            &gpu.parameters,
-            &gpu.acceleration.tlas,
-            &gpu.scene_tables,
-            &accumulation,
-            lut,
-        )
-    })?;
+    let (accumulation, bind_group) = run_in_error_scopes(&context.device, "allocating the film", || {
+        let accumulation = create_cycles_film(&context.device, image_accumulation_bytes(width, height));
+        let bind_group = with_cycles_cache_on(Some(&context.device_lost), |device, _queue, layout, lut| {
+            create_cycles_bind_group(
+                device,
+                layout,
+                &gpu.parameters,
+                &gpu.acceleration.tlas,
+                &gpu.scene_tables,
+                &accumulation,
+                lut,
+            )
+        })?;
+        Ok::<_, napi::Error>((accumulation, bind_group))
+    })??;
     gpu.film = Some(SessionFilm { width, height, accumulation, bind_group });
     Ok(false)
 }
@@ -712,6 +759,27 @@ fn clear_film(context: &CyclesDeviceContext, film: &SessionFilm) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_image_whose_film_exceeds_the_binding_limit_is_refused_with_the_table_name() {
+        let limits = wgpu::Limits::default();
+        let message = check_image_fits_device(8192, 8192, &limits).unwrap_err().reason;
+        assert!(message.contains("The film accumulation table needs"), "{message}");
+        assert!(check_image_fits_device(256, 256, &limits).is_ok());
+    }
+
+    #[test]
+    fn an_image_wider_than_the_dispatch_limit_is_refused() {
+        let limits = wgpu::Limits {
+            max_storage_buffer_binding_size: u32::MAX,
+            max_buffer_size: u64::MAX,
+            ..wgpu::Limits::default()
+        };
+        let width = limits.max_compute_workgroups_per_dimension * 8 + 1;
+        let message = check_image_fits_device(width, 1, &limits).unwrap_err().reason;
+        assert!(message.contains("workgroups"), "{message}");
+        assert!(message.contains("pixels per side"), "{message}");
+    }
 
     #[test]
     fn a_dispatch_budget_is_refused_for_the_light_tree_probe_and_allowed_for_the_image() {

@@ -63,6 +63,45 @@ pub(crate) fn missing_ray_query_message(adapter_name: &str, device_type: wgpu::D
     )
 }
 
+/// The most bytes one storage buffer can hold on this device: a binding is capped by the binding limit and the buffer by the buffer limit.
+pub(crate) fn largest_storage_buffer_bytes(limits: &wgpu::Limits) -> u64 {
+    u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size)
+}
+
+/// Refuses a table that does not fit one storage buffer of the device, naming the table, its size and the limit. Without this
+/// the upload makes an invalid buffer, wgpu reports it late, and the render fails with a message that does not say why.
+pub(crate) fn check_buffer_sizes_fit(tables: &[(&str, u64)], limits: &wgpu::Limits) -> Result<()> {
+    let limit_bytes = largest_storage_buffer_bytes(limits);
+    for (table_name, table_bytes) in tables {
+        if *table_bytes > limit_bytes {
+            return Err(failure(format!(
+                "The {table_name} table needs {table_bytes} bytes, but the device binding limit is {limit_bytes} bytes. \
+                 Reduce the scene (fewer triangles, instances, lights or a smaller image) or render on a GPU with a larger storage buffer limit."
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Runs GPU work inside an out-of-memory and a validation error scope and turns what wgpu reports into an error that says
+/// what was being done. The error then belongs to this call alone: it does not mark the shared device lost.
+pub(crate) fn run_in_error_scopes<T>(device: &wgpu::Device, doing: &str, work: impl FnOnce() -> T) -> Result<T> {
+    let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let memory_scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+    let produced = work();
+    let memory_error = pollster::block_on(memory_scope.pop());
+    let validation_error = pollster::block_on(validation_scope.pop());
+    if let Some(error) = memory_error {
+        return Err(failure(format!(
+            "The GPU ran out of memory while {doing}: {error}. Lower the image size or the scene size and run the render again."
+        )));
+    }
+    if let Some(error) = validation_error {
+        return Err(failure(format!("The GPU rejected the work while {doing}: {error}")));
+    }
+    Ok(produced)
+}
+
 pub(crate) fn open_device() -> Result<(wgpu::Device, wgpu::Queue, wgpu::AdapterInfo)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
@@ -99,8 +138,27 @@ pub(crate) fn open_device() -> Result<(wgpu::Device, wgpu::Queue, wgpu::AdapterI
 
 #[cfg(test)]
 mod tests {
-    use super::{missing_ray_query_message, padded_storage_bytes};
+    use super::{check_buffer_sizes_fit, largest_storage_buffer_bytes, missing_ray_query_message, padded_storage_bytes};
     use std::borrow::Cow;
+
+    #[test]
+    fn a_table_over_the_binding_limit_is_named_with_its_size_and_the_limit() {
+        let limits = wgpu::Limits::default();
+        let limit_bytes = largest_storage_buffer_bytes(&limits);
+        let message = check_buffer_sizes_fit(&[("lights", 16), ("triangles", limit_bytes + 1)], &limits)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("The triangles table needs"));
+        assert!(message.contains(&format!("{} bytes", limit_bytes + 1)));
+        assert!(message.contains(&format!("limit is {limit_bytes} bytes")));
+    }
+
+    #[test]
+    fn tables_at_or_under_the_limit_pass() {
+        let limits = wgpu::Limits::default();
+        let limit_bytes = largest_storage_buffer_bytes(&limits);
+        assert!(check_buffer_sizes_fit(&[("triangles", limit_bytes), ("lights", 0)], &limits).is_ok());
+    }
 
     #[test]
     fn a_software_adapter_is_named_with_the_driver_fix() {

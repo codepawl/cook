@@ -8,7 +8,7 @@ use napi::bindgen_prelude::{Float32Array, Object, Uint32Array, Uint8Array};
 use napi::{Env, Result};
 use napi_derive::napi;
 
-use crate::host::denoise::{atrous_denoise, DenoiseInput};
+use crate::host::denoise::{atrous_denoise, DenoiseInput, DeviceHealth};
 use crate::host::device::failure;
 use crate::host::film::{
     image_accumulation_bytes, image_workgroups, pad_texel_vectors, resolve_image, resolve_texels,
@@ -19,7 +19,7 @@ use crate::host::cycles_session::{
 };
 use crate::host::cycles_update::UpdatableTable;
 use crate::host::session::{
-    get_cached_device, note_environment_closing, note_environment_loaded, prepare_scene, run_cycles_lobe_probe, trace_samples, CyclesTrace, JobShape,
+    get_cycles_device_context, note_environment_closing, note_environment_loaded, prepare_scene, run_cycles_lobe_probe, trace_samples, CyclesTrace, JobShape,
 };
 
 /// Registers the shutdown step that destroys the GPU device before the process exits (see `note_environment_closing`).
@@ -395,6 +395,11 @@ fn session_render_result(
                 depth: &resolved.depth,
                 variance: &resolved.variance,
             },
+            &DeviceHealth {
+                device_lost: &context.device_lost,
+                device_error: &context.device_error,
+                uncaptured_error: &context.uncaptured_error,
+            },
         )?)
     } else {
         None
@@ -557,10 +562,10 @@ impl NativeCyclesSession {
 /// Filters a traced image with the edge-avoiding a-trous wavelet filter on the GPU (spatial only; the result is biased).
 #[napi]
 pub fn denoise_atrous(options: DenoiseAtrousOptions) -> Result<DenoiseAtrousResult> {
-    let (device, queue, _adapter, _backend, _features) = get_cached_device()?;
+    let context = get_cycles_device_context()?;
     let output = atrous_denoise(
-        &device,
-        &queue,
+        &context.device,
+        &context.queue,
         &DenoiseInput {
             width: options.width,
             height: options.height,
@@ -569,6 +574,11 @@ pub fn denoise_atrous(options: DenoiseAtrousOptions) -> Result<DenoiseAtrousResu
             normal: &options.normal,
             depth: &options.depth,
             variance: &options.variance,
+        },
+        &DeviceHealth {
+            device_lost: &context.device_lost,
+            device_error: &context.device_error,
+            uncaptured_error: &context.uncaptured_error,
         },
     )?;
     Ok(DenoiseAtrousResult {

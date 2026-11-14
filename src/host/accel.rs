@@ -11,7 +11,8 @@ pub(crate) const INSTANCE_RECORD_BYTES: usize = 160;
 pub(crate) const TRIANGLE_RECORD_BYTES: usize = 224;
 const VERTEX_STRIDE_BYTES: u64 = 12;
 const IDENTITY_TRANSFORM_3X4: [f32; 12] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-const MAX_TLAS_INSTANCES: usize = 1 << 24;
+/// The fewest instances a TLAS holds on any adapter that supports ray queries.
+const MINIMUM_TLAS_INSTANCES: usize = (1 << 24) - 1;
 const INSTANCE_RAY_VISIBILITY_MASK: u32 = 0x3F;
 
 pub(crate) struct UnpackedTriangles {
@@ -352,6 +353,11 @@ pub(crate) fn build_empty_cycles_acceleration(device: &wgpu::Device, queue: &wgp
     }
 }
 
+/// The most instances one TLAS holds on this device: what the device reports, never below the supported minimum.
+pub(crate) fn tlas_instance_limit(limits: &wgpu::Limits) -> usize {
+    (limits.max_tlas_instance_count as usize).max(MINIMUM_TLAS_INSTANCES)
+}
+
 /// Builds one hardware BLAS per unique `InstanceRecord.blas_index` and one hardware TLAS over all `instance_count` instances.
 pub(crate) fn build_cycles_acceleration_structure(
     device: &wgpu::Device,
@@ -360,10 +366,11 @@ pub(crate) fn build_cycles_acceleration_structure(
     instance_count: usize,
     triangle_bytes: &[u8],
     triangle_count: usize,
+    max_instances: usize,
 ) -> Result<CyclesAcceleration> {
-    if instance_count > MAX_TLAS_INSTANCES {
+    if instance_count > max_instances {
         return Err(failure(format!(
-            "Instance count {instance_count} exceeds the hardware 24-bit custom index limit ({MAX_TLAS_INSTANCES})."
+            "Instance count {instance_count} exceeds the limit of {max_instances} instances the device builds in one TLAS. Merge instances or render fewer."
         )));
     }
     if instance_count == 0 || triangle_count == 0 {
@@ -488,4 +495,18 @@ pub(crate) fn build_cycles_acceleration_structure(
         instance_blas_indices,
         _vertex_buffer: vertex_buffer,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{tlas_instance_limit, MINIMUM_TLAS_INSTANCES};
+
+    #[test]
+    fn the_tlas_limit_follows_the_device_with_a_floor() {
+        let mut limits = wgpu::Limits::default();
+        limits.max_tlas_instance_count = 0;
+        assert_eq!(tlas_instance_limit(&limits), MINIMUM_TLAS_INSTANCES);
+        limits.max_tlas_instance_count = (MINIMUM_TLAS_INSTANCES + 10) as u32;
+        assert_eq!(tlas_instance_limit(&limits), MINIMUM_TLAS_INSTANCES + 10);
+    }
 }
