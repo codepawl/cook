@@ -5,7 +5,7 @@ use napi::Result;
 use napi_derive::napi;
 
 use super::accel::{INSTANCE_RECORD_BYTES, TRIANGLE_RECORD_BYTES};
-use super::device::{largest_storage_buffer_bytes, request_adapter, required_device_limits};
+use super::device::{largest_storage_buffer_bytes, DEVICE_BUFFER_CAP_BYTES, request_adapter, required_device_limits};
 
 /// One triangle of the scene: three vertices of three f32, read by the acceleration structure build.
 pub(crate) const VERTEX_BYTES_PER_TRIANGLE: u64 = 3 * 12;
@@ -69,7 +69,7 @@ fn vulkan_heaps(adapter: &wgpu::Adapter) -> Option<Vec<(u32, u64)>> {
 }
 
 pub(crate) fn max_unique_triangles(limits: &wgpu::Limits) -> u64 {
-    (largest_storage_buffer_bytes(limits) / TRIANGLE_RECORD_BYTES as u64).min(limits.max_buffer_size / VERTEX_BYTES_PER_TRIANGLE)
+    (largest_storage_buffer_bytes(limits) / TRIANGLE_RECORD_BYTES as u64).min(limits.max_buffer_size.min(DEVICE_BUFFER_CAP_BYTES) / VERTEX_BYTES_PER_TRIANGLE)
 }
 
 #[napi]
@@ -122,6 +122,25 @@ mod tests {
         comment[3..].split(' ').next().unwrap().parse().unwrap()
     }
 
+    /// The bytes of the fields of `struct <name> {}` in abi.wgsl, summed from their types (the structs hold no padding).
+    fn wgsl_field_bytes(name: &str) -> usize {
+        let body_start = ABI_SOURCE.find(&format!("struct {name} {{")).unwrap();
+        let body = &ABI_SOURCE[body_start..];
+        let body = &body[..body.find("
+}").unwrap()];
+        body.lines()
+            .skip(1)
+            .filter_map(|line| line.split(':').nth(1))
+            .map(|field_type| match field_type.trim().trim_end_matches(',') {
+                "u32" | "i32" | "f32" => 4,
+                "vec2<f32>" | "vec2<u32>" => 8,
+                "vec3<f32>" | "vec3<u32>" => 12,
+                "vec4<f32>" | "vec4<u32>" => 16,
+                other => panic!("unknown WGSL field type {other} in {name}"),
+            })
+            .sum()
+    }
+
     fn packer_stride(name: &str) -> usize {
         let line = PACKER_SOURCE.lines().find(|line| line.trim_start().starts_with(&format!("{name}:"))).unwrap();
         line.split(':').nth(1).unwrap().trim().trim_end_matches(',').parse().unwrap()
@@ -131,14 +150,24 @@ mod tests {
     fn the_per_item_costs_equal_the_packed_layouts() {
         assert_eq!(TRIANGLE_RECORD_BYTES, wgsl_struct_bytes("TriangleRecord"));
         assert_eq!(TRIANGLE_RECORD_BYTES, packer_stride("triangle"));
+        assert_eq!(TRIANGLE_RECORD_BYTES, wgsl_field_bytes("TriangleRecord"));
         assert_eq!(INSTANCE_RECORD_BYTES, wgsl_struct_bytes("InstanceRecord"));
         assert_eq!(INSTANCE_RECORD_BYTES, packer_stride("instance"));
+        assert_eq!(INSTANCE_RECORD_BYTES, wgsl_field_bytes("InstanceRecord"));
     }
 
     #[test]
     fn the_vertex_and_texel_costs_follow_their_element_types() {
         assert_eq!(VERTEX_BYTES_PER_TRIANGLE, 3 * 3 * std::mem::size_of::<f32>() as u64);
         assert_eq!(TEXEL_BYTES, std::mem::size_of::<u32>() as u64);
+    }
+
+    #[test]
+    fn the_vertex_side_is_clamped_to_the_device_buffer_cap() {
+        let limits = wgpu::Limits { max_storage_buffer_binding_size: u64::MAX, max_buffer_size: u64::MAX, ..wgpu::Limits::default() };
+        let by_vertices = DEVICE_BUFFER_CAP_BYTES / VERTEX_BYTES_PER_TRIANGLE;
+        assert!(max_unique_triangles(&limits) <= by_vertices);
+        assert_eq!(max_unique_triangles(&limits), (u64::MAX / TRIANGLE_RECORD_BYTES as u64).min(by_vertices));
     }
 
     #[test]
