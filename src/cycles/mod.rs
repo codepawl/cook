@@ -1191,6 +1191,21 @@ fn ").unwrap_or(sample_body.len());
         assert!(!setup_body.contains("coat_albedo = coat_albedo * pres.xyz"));
     }
 
+    /// A scene whose only material is pure metal specializes the kernel to one lobe and one candidate. The first lobe of
+    /// such a closure must be stored through a constant index: the dynamic whole-lobe store lost its weight on the GPU and
+    /// the metal rendered black (#29).
+    #[test]
+    fn a_pure_metal_scene_specializes_to_one_lobe_and_the_kernel_stores_the_first_lobe_by_constant_index() {
+        assert_eq!(base_layer_lobe_bound(&opaque_inputs(1.0, 0.0)), 1);
+
+        let kernel = assemble_cycles_kernel().expect("the kernel assembles");
+        let add_start = kernel.find("fn closure_add_candidate(").expect("the candidate adder exists");
+        let add_end = add_start + kernel[add_start..].find("\n}\n").expect("the adder ends");
+        let add_body = &kernel[add_start..add_end];
+        assert!(add_body.contains("if (slot == 0u) {\n      (*closure).lobes[0] = lobe;"));
+        assert!(add_body.contains("(*closure).lobes[slot] = lobe;"));
+    }
+
     #[test]
     fn metallic_near_one_keeps_the_specular_and_diffuse_lobes_the_kernel_builds() {
         assert_eq!(base_layer_lobe_bound(&opaque_inputs(1.0, 0.0)), 1);

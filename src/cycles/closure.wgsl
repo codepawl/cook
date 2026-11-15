@@ -506,7 +506,14 @@ fn closure_add_candidate(closure: ptr<function, Closure>, scratch: ptr<function,
   if (CLOSURE_PRUNES_CANDIDATES) {
     (*scratch)[slot] = lobe;
   } else {
-    (*closure).lobes[slot] = lobe;
+    // The first lobe goes through a constant index. A whole-lobe store through the dynamic `slot` into a closure that
+    // holds one lobe (a scene whose only material is pure metal) lost the weight of the lobe on the GPU of the test
+    // runs, so the metal rendered black (codepawl/cook#29). Later slots keep the dynamic store.
+    if (slot == 0u) {
+      (*closure).lobes[0] = lobe;
+    } else {
+      (*closure).lobes[slot] = lobe;
+    }
     (*closure).total_sample_weight = (*closure).total_sample_weight + lobe.sample_weight;
   }
   (*closure).lobe_count = slot + 1u;
