@@ -399,6 +399,22 @@ export function loadNativeAddon() {
   return addon;
 }
 
+/**
+ * What the adapter can hold, read before a scene is exported: `deviceLocalMemoryBytes` (undefined when the driver reports no
+ * device-local heap, with the reason in `deviceLocalMemorySource`), `largestTableBytes` (the most one table of the packed scene
+ * may take), the bytes one unique triangle (`triangleTableBytes` + `triangleVertexBytes`), instance (`instanceTableBytes`) and
+ * texture texel (`texelBytes`) cost, and the counts those allow (`maxUniqueTriangles`, `maxInstances`, `maxTextureTexels`).
+ * The costs are the packed tables only; the acceleration structure is sized by the driver (`includesAccelerationStructure` is false).
+ * A scene over a limit fails in `traceNative` with one error that names the table, its size, the limit and the overshoot.
+ */
+export function readAdapterCapacity() {
+  const addon = loadNativeAddon();
+  if (typeof addon.adapterCapacity !== 'function') {
+    throw new Error('This native addon was built before adapterCapacity existed. Build it again with `npm run build` or fetch a newer one with `npx cook fetch-addon`.');
+  }
+  return addon.adapterCapacity();
+}
+
 const warnedAddonPaths = new Set();
 
 /** The version the package.json next to this file declares: the addon built from this checkout reports the same one. */

@@ -18,6 +18,7 @@ use crate::host::accel::{
     build_cycles_acceleration_structure, rebuild_cycles_tlas, tlas_instance_limit, CyclesAcceleration, INSTANCE_RECORD_BYTES,
 };
 use crate::host::cycles_update::{choose_film_use, plan_instance_update, FilmRequest, ProgressiveFilm, UpdatableTable};
+use crate::host::capacity::TEXEL_BYTES;
 use crate::host::device::{check_buffer_sizes_fit, failure, run_in_error_scopes, storage_buffer};
 use crate::host::film::{image_accumulation_bytes, image_workgroups, read_accumulation};
 use crate::host::session::{
@@ -26,7 +27,7 @@ use crate::host::session::{
     validate_render_extent, with_cycles_cache_on, CyclesDeviceContext, CyclesDispatchTarget, CyclesTrace, DispatchPlan,
     PipelineKey,
 };
-use crate::host::textures::{check_texture_pool_budget, create_cycles_film, create_cycles_parameters, upload_cycles_scene_tables};
+use crate::host::textures::{create_cycles_film, create_cycles_parameters, upload_cycles_scene_tables};
 use crate::NativeTraceInputV2;
 
 const KERNEL_PARAMS_WIDTH_BYTE: usize = 8;
@@ -297,7 +298,7 @@ pub(crate) fn choose_tile_budget_plan(budget_ms: f64, request: &CyclesRenderRequ
 fn check_scene_table_budget(input: &NativeTraceInputV2, limits: &wgpu::Limits) -> Result<()> {
     let optional_bytes = |table: &Option<Uint8Array>| table.as_ref().map_or(0, |bytes| bytes.len() as u64);
     let light_to_tree_bytes = input.light_to_tree.as_ref().map_or(0, |words| words.len() as u64 * 4);
-    let tables: [(&str, u64); 10] = [
+    let tables: [(&str, u64); 11] = [
         ("instances", input.instances.len() as u64),
         ("triangles", input.triangles.len() as u64),
         ("materials", input.materials.len() as u64),
@@ -308,6 +309,7 @@ fn check_scene_table_budget(input: &NativeTraceInputV2, limits: &wgpu::Limits) -
         ("light to tree", light_to_tree_bytes),
         ("environment", input.environment_texels.len() as u64 * 4),
         ("texture descriptors", input.texture_descriptors.len() as u64),
+        ("texture pool", input.texture_texels.len() as u64 * TEXEL_BYTES),
     ];
     check_buffer_sizes_fit(&tables, limits)
 }
@@ -344,8 +346,6 @@ impl CyclesSession {
         validate_cycles_input(input)?;
         check_counts_match_kernel_params(input)?;
         let context = get_cycles_device_context()?;
-        let pool_limit_bytes = u64::from(context.device.limits().max_storage_buffer_binding_size);
-        check_texture_pool_budget(input.texture_texels.len() as u64 * 4, pool_limit_bytes)?;
         let device_limits = context.device.limits();
         check_scene_table_budget(input, &device_limits)?;
         let scene_specialization = scan_scene_specialization(input);
