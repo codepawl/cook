@@ -198,6 +198,8 @@ export function buildFlattenedJobNativeInput(scene, camera, options, pack, resol
   const carriedFields = carriedMaterialFieldsOfScene(scene, resolveTexture);
   // The sample count goes into the kernel parameters, as it does when the kernel upgrades the tables itself.
   const upgradeOptions = {
+    ...(options.directLighting === undefined ? {} : { directLighting: options.directLighting }),
+    ...(options.filterGlossy === undefined ? {} : { filterGlossy: options.filterGlossy }),
     ...(options.samples === undefined ? {} : { samples: options.samples }),
     ...(options.textureMips === undefined ? {} : { textureMips: options.textureMips }),
     ...(options.texturePoolMaxBytes === undefined ? {} : { texturePoolMaxBytes: options.texturePoolMaxBytes }),
