@@ -82,6 +82,12 @@ jobs:
           rm -rf crucible/node_modules/@codepawlhq/cook
           mkdir -p crucible/node_modules/@codepawlhq
           cp -r cook crucible/node_modules/@codepawlhq/cook
-      - name: Run the Crucible tests whose names start with native-pack or cook-kernel
+      # Every Crucible test that loads Cook or packs its input runs here. A narrower list let a kernel parameter block that
+      # grew from 320 to 336 bytes pass this job while ten Crucible tests failed on it (codepawl/crucible#1279).
+      # Tests that need the native addon skip their GPU parts, as they do in Crucible's own unit job.
+      - name: Run the Crucible tests that load Cook or pack its input
         working-directory: crucible
-        run: node --test tests/native-pack*.test.js tests/cook-kernel*.test.js
+        run: |
+          mapfile -t files < <(grep -lE "@codepawlhq/cook|render-native|createNativeSession|traceNative|kernelParams" tests/*.test.js | sort)
+          echo "Running ${#files[@]} Crucible test files"
+          node --test "${files[@]}"
