@@ -69,6 +69,9 @@ pub(crate) fn read_accumulation(
         .map_err(|error| failure(format!("Could not read the result back: {error}")))?;
     let sums: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&mapped).to_vec();
     drop(mapped);
+    // Release the one-frame staging buffer now instead of when a later poll collects the dropped handle.
+    readback.unmap();
+    readback.destroy();
     Ok(sums)
 }
 
