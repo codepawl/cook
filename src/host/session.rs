@@ -1164,6 +1164,17 @@ pub(crate) fn run_cycles_lobe_probe(options: &ProbeCyclesLobeOptions, shader_sou
     }
 
     let (device, queue, _, _, _) = get_cached_device()?;
+    // The probe uploads a caller's materials, texture descriptors and texel pool, so they meet the same limit check as a scene.
+    let texel_pool_bytes = options.texture_texels.as_ref().map_or(0, |words| words.len() as u64 * 4);
+    check_buffer_sizes_fit(
+        &[
+            ("materials", options.materials.len() as u64),
+            ("texture descriptors", options.texture_descriptors.as_ref().map_or(0, |bytes| bytes.len() as u64)),
+            ("texture pool", texel_pool_bytes),
+            ("film accumulation", image_accumulation_bytes(options.width, options.height)),
+        ],
+        &device.limits(),
+    )?;
     let pipeline = get_or_compile_cycles_pipeline("test_lobe_samples", shader_source)?;
     let acceleration = build_empty_cycles_acceleration(&device, &queue);
     let accumulation_bytes = image_accumulation_bytes(options.width, options.height);

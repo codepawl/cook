@@ -7,7 +7,8 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { findNativeAddon, isTimeLimitError, traceNative } from '../../index.mjs';
+import { findNativeAddon, isTimeLimitError, readAdapterCapacity, traceNative } from '../../index.mjs';
+import { STRUCT_STRIDES_V2 } from '../../pack-input-v2.mjs';
 import { decodePackFile } from '../../pack-file.mjs';
 import { crc32 } from '../../output/png.mjs';
 import { decodeNpy, decodePng } from '../support/images.mjs';
@@ -100,4 +101,36 @@ test('cook render exits 4 and writes nothing when the time limit passes', { skip
   assert.equal(result.status, 4, result.stderr);
   assert.match(result.stderr, /time limit of 0\.05 s; nothing was written/);
   assert.equal(existsSync(picturePath), false);
+});
+
+test('readAdapterCapacity reports the limits and the per-item costs the packed layouts use', { skip }, () => {
+  const capacity = readAdapterCapacity();
+  assert.ok(capacity.adapter.length > 0);
+  assert.equal(capacity.triangleTableBytes, STRUCT_STRIDES_V2.triangle);
+  assert.equal(capacity.instanceTableBytes, STRUCT_STRIDES_V2.instance);
+  assert.equal(capacity.texelBytes, 4);
+  assert.equal(capacity.includesAccelerationStructure, false);
+  assert.ok(capacity.largestTableBytes > 0);
+  assert.equal(capacity.maxUniqueTriangles <= capacity.largestTableBytes / capacity.triangleTableBytes, true);
+  if (capacity.deviceLocalMemoryBytes === undefined) {
+    assert.match(capacity.deviceLocalMemorySource, /^unavailable/);
+  } else {
+    assert.ok(capacity.deviceLocalMemoryBytes >= capacity.largestTableBytes);
+  }
+});
+
+test('a texture pool over the device limit fails with one error naming the limit and the overshoot', { skip }, () => {
+  const { largestTableBytes } = readAdapterCapacity();
+  const overshootBytes = 4096;
+  const oversizedInput = { ...decodePackFile(readFileSync(FIXTURE_PATH)), textureTexels: new Uint32Array((largestTableBytes + overshootBytes) / 4) };
+  assert.throws(
+    () => traceNative(oversizedInput, { kernel: 'cycles', width: 8, height: 6, samples: 1 }),
+    (error) => {
+      assert.match(error.message, /The texture pool table needs \d+ bytes, but the device limit is \d+ bytes/);
+      assert.ok(error.message.includes(`${largestTableBytes} bytes`));
+      assert.ok(error.message.includes(`${overshootBytes} bytes over`));
+      assert.match(error.message, /fewer or smaller textures/);
+      return true;
+    }
+  );
 });

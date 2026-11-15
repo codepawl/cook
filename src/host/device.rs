@@ -74,9 +74,10 @@ pub(crate) fn check_buffer_sizes_fit(tables: &[(&str, u64)], limits: &wgpu::Limi
     let limit_bytes = largest_storage_buffer_bytes(limits);
     for (table_name, table_bytes) in tables {
         if *table_bytes > limit_bytes {
+            let overshoot_bytes = table_bytes - limit_bytes;
             return Err(failure(format!(
-                "The {table_name} table needs {table_bytes} bytes, but the device binding limit is {limit_bytes} bytes. \
-                 Reduce the scene (fewer triangles, instances, lights or a smaller image) or render on a GPU with a larger storage buffer limit."
+                "The {table_name} table needs {table_bytes} bytes, but the device limit is {limit_bytes} bytes (the smaller of max storage buffer binding size {} and max buffer size {}), {overshoot_bytes} bytes over. Drop what fills this table: fewer triangles, fewer instances, fewer or smaller textures or a smaller image, or render on a GPU with a larger storage buffer limit. `adapterCapacity()` lists the limits and the bytes each triangle, instance and texel costs.",
+                limits.max_storage_buffer_binding_size, limits.max_buffer_size
             )));
         }
     }
@@ -102,29 +103,41 @@ pub(crate) fn run_in_error_scopes<T>(device: &wgpu::Device, doing: &str, work: i
     Ok(produced)
 }
 
-pub(crate) fn open_device() -> Result<(wgpu::Device, wgpu::Queue, wgpu::AdapterInfo)> {
+/// Cook asks the device for at most this much per buffer, whatever the adapter offers (1 GiB).
+pub(crate) const DEVICE_BUFFER_CAP_BYTES: u64 = 1 << 30;
+
+/// The adapter Cook renders on: the high performance Vulkan adapter, or an error that says why there is none.
+pub(crate) fn request_adapter() -> Result<wgpu::Adapter> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         ..Default::default()
     }))
-    .map_err(|error| failure(format!("No Vulkan adapter: {error}")))?;
-    if !adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
-        let adapter_info = adapter.get_info();
-        return Err(failure(missing_ray_query_message(&adapter_info.name, adapter_info.device_type)));
-    }
-    let adapter_limits = adapter.limits();
-    let required_limits = wgpu::Limits {
-        max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size.min(1 << 30),
-        max_buffer_size: adapter_limits.max_buffer_size.min(1 << 30),
+    .map_err(|error| failure(format!("No Vulkan adapter: {error}")))
+}
+
+/// The limits Cook opens the device with, from what the adapter offers.
+pub(crate) fn required_device_limits(adapter_limits: &wgpu::Limits) -> wgpu::Limits {
+    wgpu::Limits {
+        max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size.min(DEVICE_BUFFER_CAP_BYTES),
+        max_buffer_size: adapter_limits.max_buffer_size.min(DEVICE_BUFFER_CAP_BYTES),
         // The light bake binds nine storage buffers (the scene, the accumulation and the texels); the default allows eight.
         max_storage_buffers_per_shader_stage: adapter_limits.max_storage_buffers_per_shader_stage.min(16),
         ..wgpu::Limits::default()
     }
-    .using_minimum_supported_acceleration_structure_values();
+    .using_minimum_supported_acceleration_structure_values()
+}
+
+pub(crate) fn open_device() -> Result<(wgpu::Device, wgpu::Queue, wgpu::AdapterInfo)> {
+    let adapter = request_adapter()?;
+    if !adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
+        let adapter_info = adapter.get_info();
+        return Err(failure(missing_ray_query_message(&adapter_info.name, adapter_info.device_type)));
+    }
+    let required_limits = required_device_limits(&adapter.limits());
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("render-native"),
         required_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY,
@@ -150,7 +163,28 @@ mod tests {
             .to_string();
         assert!(message.contains("The triangles table needs"));
         assert!(message.contains(&format!("{} bytes", limit_bytes + 1)));
-        assert!(message.contains(&format!("limit is {limit_bytes} bytes")));
+        assert!(message.contains(&format!("device limit is {limit_bytes} bytes")));
+        assert!(message.contains("1 bytes over"));
+        assert!(message.contains("Drop what fills this table"));
+    }
+
+    #[test]
+    fn an_oversized_texture_pool_names_the_limit_the_overshoot_and_what_to_drop() {
+        let limits = wgpu::Limits::default();
+        let limit_bytes = largest_storage_buffer_bytes(&limits);
+        let message = check_buffer_sizes_fit(&[("texture pool", limit_bytes + 4096)], &limits).unwrap_err().to_string();
+        assert!(message.contains("The texture pool table needs"), "{message}");
+        assert!(message.contains(&format!("device limit is {limit_bytes} bytes")), "{message}");
+        assert!(message.contains("4096 bytes over"), "{message}");
+        assert!(message.contains("fewer or smaller textures"), "{message}");
+    }
+
+    #[test]
+    fn the_too_large_message_has_no_run_of_spaces() {
+        let limits = wgpu::Limits::default();
+        let limit_bytes = largest_storage_buffer_bytes(&limits);
+        let message = check_buffer_sizes_fit(&[("triangles", limit_bytes + 1)], &limits).unwrap_err().to_string();
+        assert!(!message.contains("  "), "{message}");
     }
 
     #[test]
