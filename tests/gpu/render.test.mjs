@@ -124,7 +124,7 @@ test('a texture pool over the device limit fails with one error naming the limit
   const overshootBytes = 4096;
   const oversizedInput = { ...decodePackFile(readFileSync(FIXTURE_PATH)), textureTexels: new Uint32Array((largestTableBytes + overshootBytes) / 4) };
   assert.throws(
-    () => traceNative(oversizedInput, { kernel: 'cycles', width: 8, height: 8, samples: 1 }),
+    () => traceNative(oversizedInput, { kernel: 'cycles', width: 8, height: 6, samples: 1 }),
     (error) => {
       assert.match(error.message, /The texture pool table needs \d+ bytes, but the device limit is \d+ bytes/);
       assert.ok(error.message.includes(`${largestTableBytes} bytes`));
