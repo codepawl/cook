@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [so-pdf-after-light-to-tree, so-pdf-after-emitter-read, so-pdf-node-read, so-all-importance-const, so-profiles-invisible, so-profile-importance-const]
+        variant: [pdf-return-at-leaf, pdf-return-before-trail, pdf-no-trail, pdf-no-divide, cp-pdf-return-at-leaf, cp-pdf-no-trail]
     defaults:
       run:
         shell: bash

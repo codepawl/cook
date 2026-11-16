@@ -18,6 +18,17 @@ const MAX_LEVEL = 'let max_level = min(kernel_params.light_tree_node_count, LTR_
 const sampleOff = [TREE, SAMPLE_HEAD, `${SAMPLE_HEAD}  *pick_probability_out = 1.0;\n  return -1;\n`];
 const pdfOff = [TREE, PDF_HEAD, `${PDF_HEAD}  return 0.0;\n`];
 
+const PDF_LEAF = '    if (node.left_child < 0) {\n      let emitter_count = min(node.emitter_count_and_kind & LTR_NODE_EMITTER_COUNT_MASK, LTR_MAX_LEAF_EMITTERS);\n';
+const PDF_TRAIL = '    let trail_word = select(target_emitter.bit_trail_low, target_emitter.bit_trail_high, level >= 32u);\n';
+const PDF_GOES_RIGHT = '    let goes_right = ((trail_word >> (level & 31u)) & 1u) != 0u;';
+const PDF_DIVIDE = '      var minimum_term = 1.0 / f32(emitters_with_importance);';
+const ALL_CONST = [
+  sampleOff,
+  [TREE, CHILD_HEAD, `${CHILD_HEAD}  return vec2<f32>(1.0);\n`],
+  [TREE, EMITTER_HEAD, `${EMITTER_HEAD}  return vec2<f32>(1.0);\n`],
+  [TREE, LEFT_BODY, ') -> bool {\n  *left_probability_out = 0.5;\n  return true;\n  let left = ltr_child_importance'],
+];
+
 const VARIANTS = {
   base: [],
   // Control: the tree is dead code, so this must behave like a tree with no emitters.
@@ -46,6 +57,13 @@ const VARIANTS = {
     [TREE, NODE_PROFILE_HEAD, `${NODE_PROFILE_HEAD}  return ltr_invisible_profile();\n`],
   ],
   'so-profile-importance-const': [sampleOff, [TREE, PROFILE_IMPORTANCE_HEAD, `${PROFILE_IMPORTANCE_HEAD}  return vec2<f32>(1.0);\n`]],
+  // Round 3: only the pdf walk runs and it must go deep. Cut inside it, with and without constant importance.
+  'pdf-return-at-leaf': [sampleOff, [TREE, PDF_LEAF, `${PDF_LEAF}      return pdf;\n`]],
+  'pdf-return-before-trail': [sampleOff, [TREE, PDF_TRAIL, `    return left_probability;\n${PDF_TRAIL}`]],
+  'pdf-no-trail': [sampleOff, [TREE, PDF_GOES_RIGHT, '    let goes_right = false;']],
+  'pdf-no-divide': [sampleOff, [TREE, PDF_DIVIDE, '      var minimum_term = 1.0;']],
+  'cp-pdf-return-at-leaf': [...ALL_CONST, [TREE, PDF_LEAF, `${PDF_LEAF}      return pdf;\n`]],
+  'cp-pdf-no-trail': [...ALL_CONST, [TREE, PDF_GOES_RIGHT, '    let goes_right = false;']],
   // The leaf reservoir with its pointer arguments and bit mask.
   'leaf-first-slot': [[TREE, LEAF_BODY, `${LEAF_BODY}  return i32(light_tree_nodes[leaf_index].right_or_first_emitter);\n`]],
 };
