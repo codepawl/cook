@@ -78,3 +78,15 @@ test('the legacy kernel offsets a bounce origin along the geometric normal', () 
   assert.match(legacy, /position = hitPoint \+ hitGeometricNormal \* select\(-surfaceOffset, surfaceOffset, leavesFront\);/);
   assert.doesNotMatch(legacy, /position = hitPoint \+ direction \* surfaceOffset/);
 });
+
+// The camera near distance rides in parameter word 62 so a flattened job reaches the cycles kernel with it (codepawl/crucible#1159).
+const CAMERA_NEAR_PARAMETER_FLOAT_INDEX = 62;
+
+test('a camera near distance is written to parameter word 62 and a camera without one leaves it 0', () => {
+  const sun = { direction: [0, 1, 0], color: [1, 1, 1] };
+  assert.equal(packParameters(sun)[CAMERA_NEAR_PARAMETER_FLOAT_INDEX], 0);
+  const scene = { materials: [], lights: { sun }, environment: null, surfaceOffset: 1e-4, farDistance: 100, bvh: { triangleOrder: [] } };
+  const input = buildNativeV1Tables(scene, { ...CAMERA, near: 1.5 }, { width: 4, height: 4, bounces: 3, seed: 7 }, EMPTY_PACK);
+  const parameters = new Float32Array(input.parameters.buffer, input.parameters.byteOffset, input.parameters.byteLength / 4);
+  assert.equal(parameters[CAMERA_NEAR_PARAMETER_FLOAT_INDEX], 1.5);
+});

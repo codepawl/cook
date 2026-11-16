@@ -3831,6 +3831,7 @@ export function upgradeNativeInputV1ToV2(v1Input, options = {}, carriedFields = 
     halfWidth: paramF32[32],
     halfHeight: paramF32[33],
     ...readV1ThinLens(paramF32),
+    ...(paramF32[62] > 0 ? { near: paramF32[62] } : {}),
   };
 
   const packedTextures = textureCollector.finish();

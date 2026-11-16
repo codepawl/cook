@@ -75,6 +75,11 @@ function writeParameters(scene, camera, options, lightCount, atlasWidth, subsurf
   if (environment?.cameraIntensity !== undefined) {
     floats[61] = environment.cameraIntensity === 0 ? -0 : environment.cameraIntensity;
   }
+  // Word 62 carries the camera near distance (`camera.near`, metres along the view axis) for the "cycles" kernel upgrade; 0 means none.
+  // The legacy kernel does not read it.
+  if (camera.near > 0) {
+    floats[62] = camera.near;
+  }
   return new Uint8Array(buffer);
 }
 
