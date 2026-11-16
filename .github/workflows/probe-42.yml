@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        copy: [1, 2, 3]
+        copy: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -24,7 +24,7 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-lavapipe-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers vulkan-tools vulkan-validationlayers
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers vulkan-tools vulkan-validationlayers gdb
       - run: node build.mjs
       - name: CPU
         run: |
@@ -32,7 +32,16 @@ jobs:
           grep -m1 -o -w -E "avx512f|avx512bw|avx512vl" /proc/cpuinfo | sort -u | tr '\n' ' '; echo
           vulkaninfo --summary 2>/dev/null | grep -i -E "deviceName|driverInfo"
       - name: Default
-        run: node tools/probe-lavapipe-42.mjs default
+        run: node tools/probe-lavapipe-42.mjs default || true
+      - name: Backtrace of the flat trace
+        env:
+          PROBE_ONLY: uniform
+        run: gdb -batch -ex run -ex bt -ex 'info registers rip' -ex 'x/6i $pc' --args node tools/probe-lavapipe-42.mjs gdb 2>&1 | grep -v -E "^\[(New|Thread)|libthread_db" | tail -40
+      - name: AVX caps only
+        env:
+          GALLIUM_OVERRIDE_CPU_CAPS: avx
+          PROBE_ONLY: tree,uniform
+        run: node tools/probe-lavapipe-42.mjs avx || true
       - name: GPU-assisted validation of the flat pick
         env:
           VK_LOADER_LAYERS_ENABLE: '*validation'
@@ -47,5 +56,5 @@ jobs:
           PROBE_SAMPLES: '4'
         run: |
           set +e
-          node tools/probe-lavapipe-42.mjs gpuav 2>&1 | grep -v -e "VUID-vkDestroyDevice-device-05137" -e "VUID-StandaloneSpirv-None-10684" | head -c 60000
+          node tools/probe-lavapipe-42.mjs gpuav 2>&1 | grep -v -e "VUID-vkDestroyDevice-device-05137" -e "VUID-StandaloneSpirv-None-10684" | cut -c1-3000 | head -c 60000
           echo "exit ${PIPESTATUS[0]}"
