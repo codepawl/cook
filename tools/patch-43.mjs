@@ -31,23 +31,21 @@ const VARIANTS = {
   'emitter-importance-const': [[TREE, EMITTER_HEAD, `${EMITTER_HEAD}  return vec2<f32>(1.0);\n`]],
   'left-probability-const': [[TREE, LEFT_BODY, ') -> bool {\n  *left_probability_out = 0.5;\n  return true;\n  let left = ltr_child_importance']],
   // Round 2: sample-off kept the pdf alive and still lost the device, so cut inside ltr_pdf.
-  'so-pdf-after-emitter-read': [sampleOff, [TREE, PDF_TARGET, `${PDF_TARGET}  return f32(target_emitter.bit_trail_low & 1u);
-`]],
-  'so-pdf-after-light-to-tree': [sampleOff, [TREE, PDF_TARGET, `${PDF_TARGET}  return f32(target_slot & 1u);
-`]],
-  'so-pdf-node-read': [sampleOff, [TREE, PDF_TARGET, `${PDF_TARGET}  return f32(light_tree_nodes[target_slot].left_child);
-`]],
-  'so-all-importance-const': [sampleOff, [TREE, CHILD_HEAD, `${CHILD_HEAD}  return vec2<f32>(1.0);
-`], [TREE, EMITTER_HEAD, `${EMITTER_HEAD}  return vec2<f32>(1.0);
-`], [TREE, LEFT_BODY, ') -> bool {
-  *left_probability_out = 0.5;
-  return true;
-  let left = ltr_child_importance']],
-  'so-profiles-invisible': [sampleOff, [TREE, PROFILE_HEAD, `${PROFILE_HEAD}  return ltr_invisible_profile();
-`], [TREE, NODE_PROFILE_HEAD, `${NODE_PROFILE_HEAD}  return ltr_invisible_profile();
-`]],
-  'so-profile-importance-const': [sampleOff, [TREE, PROFILE_IMPORTANCE_HEAD, `${PROFILE_IMPORTANCE_HEAD}  return vec2<f32>(1.0);
-`]],
+  'so-pdf-after-emitter-read': [sampleOff, [TREE, PDF_TARGET, `${PDF_TARGET}  return f32(target_emitter.bit_trail_low & 1u);\n`]],
+  'so-pdf-after-light-to-tree': [sampleOff, [TREE, PDF_TARGET, `${PDF_TARGET}  return f32(target_slot & 1u);\n`]],
+  'so-pdf-node-read': [sampleOff, [TREE, PDF_TARGET, `${PDF_TARGET}  return f32(light_tree_nodes[target_slot].left_child);\n`]],
+  'so-all-importance-const': [
+    sampleOff,
+    [TREE, CHILD_HEAD, `${CHILD_HEAD}  return vec2<f32>(1.0);\n`],
+    [TREE, EMITTER_HEAD, `${EMITTER_HEAD}  return vec2<f32>(1.0);\n`],
+    [TREE, LEFT_BODY, ') -> bool {\n  *left_probability_out = 0.5;\n  return true;\n  let left = ltr_child_importance'],
+  ],
+  'so-profiles-invisible': [
+    sampleOff,
+    [TREE, PROFILE_HEAD, `${PROFILE_HEAD}  return ltr_invisible_profile();\n`],
+    [TREE, NODE_PROFILE_HEAD, `${NODE_PROFILE_HEAD}  return ltr_invisible_profile();\n`],
+  ],
+  'so-profile-importance-const': [sampleOff, [TREE, PROFILE_IMPORTANCE_HEAD, `${PROFILE_IMPORTANCE_HEAD}  return vec2<f32>(1.0);\n`]],
   // The leaf reservoir with its pointer arguments and bit mask.
   'leaf-first-slot': [[TREE, LEAF_BODY, `${LEAF_BODY}  return i32(light_tree_nodes[leaf_index].right_or_first_emitter);\n`]],
 };
