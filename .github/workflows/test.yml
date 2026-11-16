@@ -126,7 +126,7 @@ jobs:
           node bin/cook.mjs render fixtures/room.cookpack --output room.png --width 64 --samples 4 2>&1 | tee render.log
           test -s room.png
           # Two known reports are not failures: a shader module still alive when the device is destroyed, and naga's ArrayStride
-          # on a private array (VUID 10684), which newer layers flag and every driver runs.
+          # on a private array (VUID 10684, https://github.com/gfx-rs/wgpu/issues/7696), which newer layers flag and drivers run.
           if grep "Validation Error" render.log | grep -v -e "VUID-vkDestroyDevice-device-05137" -e "VUID-StandaloneSpirv-None-10684"; then
             echo "The Vulkan validation layer reported an error; see render.log above."
             exit 1
