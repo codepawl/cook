@@ -91,3 +91,43 @@ jobs:
           mapfile -t files < <(grep -lE "@codepawlhq/cook|render-native|createNativeSession|traceNative|kernelParams" tests/*.test.js | sort)
           echo "Running ${#files[@]} Crucible test files"
           node --test "${files[@]}"
+
+  # A trace of the room fixture on Mesa lavapipe, the software Vulkan adapter of GitHub's free runners (#37).
+  lavapipe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: rustup toolchain install stable --profile minimal
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-lavapipe-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers vulkan-tools vulkan-validationlayers
+      - run: vulkaninfo --summary
+      - run: node build.mjs
+      - name: Trace the room once with the validation layer logging to stdout
+        env:
+          VK_LOADER_LAYERS_ENABLE: '*validation'
+          VK_KHRONOS_VALIDATION_DEBUG_ACTION: VK_DBG_LAYER_ACTION_LOG_MSG
+          VK_KHRONOS_VALIDATION_REPORT_FLAGS: error,warn
+          VK_KHRONOS_VALIDATION_LOG_FILENAME: stdout
+        # The render must finish and the validation layer must report no error. Before #37 naga's invalid SPIR-V for a
+        # ray_query declared in a loop lost the device here on the first dispatch.
+        run: |
+          set -o pipefail
+          node bin/cook.mjs render fixtures/room.cookpack --output room.png --width 64 --samples 4 2>&1 | tee render.log
+          test -s room.png
+          # Two known reports are not failures: a shader module still alive when the device is destroyed, and naga's ArrayStride
+          # on a private array (VUID 10684, https://github.com/gfx-rs/wgpu/issues/7696), which newer layers flag and drivers run.
+          if grep "Validation Error" render.log | grep -v -e "VUID-vkDestroyDevice-device-05137" -e "VUID-StandaloneSpirv-None-10684"; then
+            echo "The Vulkan validation layer reported an error; see render.log above."
+            exit 1
+          fi
