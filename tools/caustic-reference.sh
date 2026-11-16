@@ -4,6 +4,7 @@
 #   traced     caustic light tracing on the same scene
 # for dispersion 0 and 1, and prints each box mean and the ratio traced / reference. Run from the repository root.
 #   bash tools/caustic-reference.sh <output-directory> [reference-samples] [traced-samples] [photons]
+# Set RUN_PREFIX to a command that wraps each render (a GPU queue, for example).
 set -euo pipefail
 output_directory="${1:?output directory}"
 reference_samples="${2:-512}"
@@ -13,9 +14,9 @@ box="60,55,110,85"
 common=(--width 240 --height 135 --sun-radius 0.3 --box "$box")
 mkdir -p "$output_directory"
 for dispersion in 0 1; do
-  GPU_LOCK_WEIGHT=heavy bash ~/.agents/tools/gpu-lock.sh node tools/caustic-render.mjs "$output_directory/reference-d$dispersion" \
+  ${RUN_PREFIX:-} node tools/caustic-render.mjs "$output_directory/reference-d$dispersion" \
     "${common[@]}" --dispersion "$dispersion" --samples "$reference_samples"
-  GPU_LOCK_WEIGHT=heavy bash ~/.agents/tools/gpu-lock.sh node tools/caustic-render.mjs "$output_directory/traced-d$dispersion" \
+  ${RUN_PREFIX:-} node tools/caustic-render.mjs "$output_directory/traced-d$dispersion" \
     "${common[@]}" --dispersion "$dispersion" --samples "$traced_samples" --light-tracing --photons "$photons"
 done
 node -e '
