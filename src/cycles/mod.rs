@@ -1246,6 +1246,21 @@ fn ").unwrap_or(sample_body.len());
     }
 
     #[test]
+    fn a_normal_map_frame_moves_the_object_space_tangent_and_bitangent_like_normals_as_cycles_does() {
+        let kernel = assemble_cycles_kernel().expect("the kernel assembles");
+        let frame_start = kernel.find("var normal_map_tangent = vec3<f32>(0.0);").expect("the normal map frame is built");
+        let frame_body = &kernel[frame_start..];
+        assert!(frame_body.contains("let object_bitangent = cross(object_normal, object_tangent) * select(1.0, -1.0, triangle.tangent_sign < 0.0);"));
+        assert!(frame_body.contains("normal_map_tangent = int_transform_normal_unnormalized(instance, object_tangent) * orientation;"));
+        assert!(frame_body.contains("normal_map_bitangent = int_transform_normal_unnormalized(instance, object_bitangent) * orientation;"));
+
+        let build_start = kernel.find("fn closure_build(").expect("the closure builder exists");
+        let build_body = &kernel[build_start..];
+        assert!(build_body.contains("shading_n = closure_apply_normal_map(mat.normal_tex, mat.normal_scale, point, smooth_normal, map_t, map_b);"));
+        assert!(build_body.contains("map_t = (*point).normal_map_tangent;"), "a triangle with tangents reads its map through the moved frame");
+    }
+
+    #[test]
     fn a_shadow_ray_crosses_a_smooth_thin_pane_and_the_bsdf_ray_keeps_the_mis_state() {
         let kernel = assemble_cycles_kernel().expect("the kernel assembles");
         let transmittance_start = kernel.find("fn int_thin_glass_shadow_transmittance(").expect("the pane transmittance exists");

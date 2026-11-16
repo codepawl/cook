@@ -670,15 +670,22 @@ fn closure_build(point: ptr<function, ShadingPoint>, wo: vec3<f32>, wavelength_u
     emission_color = max(emission_color * closure_sample_texture(mat.emission_tex, point).rgb, vec3<f32>(0.0));
   }
 
+  var map_t = frame_t;
+  var map_b = frame_b;
+  if (dot((*point).normal_map_tangent, (*point).normal_map_tangent) > 0.0) {
+    map_t = (*point).normal_map_tangent;
+    map_b = (*point).normal_map_bitangent;
+  }
+
   var shading_n = smooth_normal;
   if (SCENE_HAS_NORMAL_MAP) {
-    shading_n = closure_apply_normal_map(mat.normal_tex, mat.normal_scale, point, smooth_normal, frame_t, frame_b);
+    shading_n = closure_apply_normal_map(mat.normal_tex, mat.normal_scale, point, smooth_normal, map_t, map_b);
     shading_n = closure_apply_bump_map(mat.bump_tex, mat.bump_distance, point, shading_n, frame_t, frame_b);
   }
 
   var raw_coat_n = bsdf_mf_safe_normalize_fallback((*point).coat_normal, shading_n);
   if (SCENE_HAS_NORMAL_MAP) {
-    raw_coat_n = closure_apply_normal_map(mat.coat_normal_tex, mat.coat_normal_scale, point, raw_coat_n, frame_t, frame_b);
+    raw_coat_n = closure_apply_normal_map(mat.coat_normal_tex, mat.coat_normal_scale, point, raw_coat_n, map_t, map_b);
   }
 
   let preserve_energy = (mat.flags & MATERIAL_FLAG_MULTISCATTER_GGX) != 0u;
@@ -1181,6 +1188,8 @@ fn test_lobe_samples(@builtin(global_invocation_id) gid: vec3<u32>) {
   point.object_random = 0.0;
   point.light_group_mask_lo = 0xFFFFFFFFu;
   point.vertex_color = vec3<f32>(1.0);
+  point.normal_map_tangent = vec3<f32>(0.0);
+  point.normal_map_bitangent = vec3<f32>(0.0);
   point.light_group_mask_hi = 0xFFFFFFFFu;
 
   let wo = bsdf_mf_safe_normalize_fallback(kernel_params.camera_forward, vec3<f32>(0.0, 0.0, 1.0));
