@@ -392,8 +392,8 @@ const SPECTRAL_F_LINE_UM: f32 = 0.4861;
 const SPECTRAL_C_LINE_UM: f32 = 0.6563;
 // The Abbe number of a material whose `dispersion` is 1 (the OpenPBR default).
 const SPECTRAL_ABBE_AT_UNIT_DISPERSION: f32 = 20.0;
-// Mean of the clamped linear sRGB response over 400 to 700 nm, so that the weight averages to one per channel.
-const SPECTRAL_RGB_MEAN: vec3<f32> = vec3<f32>(0.58696402, 0.38445508, 0.36257666);
+// Mean of the signed linear sRGB response over 400 to 700 nm, so that the weight averages to one per channel.
+const SPECTRAL_RGB_MEAN: vec3<f32> = vec3<f32>(0.42780193, 0.33839936, 0.32177923);
 
 fn spectral_wavelength_um(unit: f32) -> f32 {
   return SPECTRAL_WAVELENGTH_MIN_UM + SPECTRAL_WAVELENGTH_RANGE_UM * unit;
@@ -421,7 +421,7 @@ fn spectral_rgb_weight(wavelength_um: f32) -> vec3<f32> {
     -0.9689 * x_bar + 1.8758 * y_bar + 0.0415 * z_bar,
     0.0557 * x_bar - 0.2040 * y_bar + 1.0570 * z_bar,
   );
-  return max(linear_rgb, vec3<f32>(0.0)) / SPECTRAL_RGB_MEAN;
+  return linear_rgb / SPECTRAL_RGB_MEAN;
 }
 
 // The refraction index at `wavelength_um` of a glass whose index at the d line is `ior`. Zero dispersion, or an index of one

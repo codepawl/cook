@@ -77,10 +77,14 @@ fn int_luminance(rgb: vec3<f32>) -> f32 {
   return 0.2126729 * rgb.x + 0.7151522 * rgb.y + 0.0721750 * rgb.z;
 }
 
+// A contribution is kept when it is finite. A scene with dispersion also keeps negative channels: the colour of a single
+// wavelength lies outside the sRGB gamut, so its linear sRGB weight has negative lobes that cancel the positive ones only once
+// the wavelengths of a pixel are summed (Cycles accumulates them signed too). Clamping each sample at zero instead drops the
+// negative lobes and desaturates the fringes while it raises the mean.
 fn int_sanitize_radiance(value: vec3<f32>) -> vec3<f32> {
-  let valid_x = value.x >= 0.0 && value.x < 1.0e30;
-  let valid_y = value.y >= 0.0 && value.y < 1.0e30;
-  let valid_z = value.z >= 0.0 && value.z < 1.0e30;
+  let valid_x = (value.x >= 0.0 || SCENE_HAS_DISPERSION) && abs(value.x) < 1.0e30;
+  let valid_y = (value.y >= 0.0 || SCENE_HAS_DISPERSION) && abs(value.y) < 1.0e30;
+  let valid_z = (value.z >= 0.0 || SCENE_HAS_DISPERSION) && abs(value.z) < 1.0e30;
   return vec3<f32>(
     select(0.0, value.x, valid_x),
     select(0.0, value.y, valid_y),

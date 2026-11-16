@@ -63,14 +63,14 @@ function wyman(nm, center, sigmaBelow, sigmaAbove) {
   return Math.exp(-0.5 * ((nm - center) / sigma) ** 2);
 }
 
-function clampedRgb(nm) {
+function signedRgb(nm) {
   const x = 1.056 * wyman(nm, 599.8, 37.9, 31.0) + 0.362 * wyman(nm, 442.0, 16.0, 26.7) - 0.065 * wyman(nm, 501.1, 20.4, 26.2);
   const y = 0.821 * wyman(nm, 568.8, 46.9, 40.5) + 0.286 * wyman(nm, 530.9, 16.3, 31.1);
   const z = 1.217 * wyman(nm, 437.0, 11.8, 36.0) + 0.681 * wyman(nm, 459.0, 26.0, 13.8);
   return [
-    Math.max(3.2406 * x - 1.5372 * y - 0.4986 * z, 0),
-    Math.max(-0.9689 * x + 1.8758 * y + 0.0415 * z, 0),
-    Math.max(0.0557 * x - 0.2040 * y + 1.0570 * z, 0),
+    3.2406 * x - 1.5372 * y - 0.4986 * z,
+    -0.9689 * x + 1.8758 * y + 0.0415 * z,
+    0.0557 * x - 0.2040 * y + 1.0570 * z,
   ];
 }
 
@@ -81,12 +81,20 @@ test('the spectral weight of the kernel averages to one per channel over the sam
   const steps = 6000;
   const mean = [0, 0, 0];
   for (let step = 0; step < steps; step++) {
-    const rgb = clampedRgb(400 + (300 * (step + 0.5)) / steps);
+    const rgb = signedRgb(400 + (300 * (step + 0.5)) / steps);
     for (let channel = 0; channel < 3; channel++) mean[channel] += rgb[channel] / steps;
   }
   for (let channel = 0; channel < 3; channel++) {
     assert.ok(Math.abs(mean[channel] - declaredMean[channel]) < 1e-6, `channel ${channel}: ${mean[channel]} against ${declaredMean[channel]}`);
   }
+});
+
+test('the spectral weight keeps its negative lobes and only a dispersive scene accumulates a negative sample', () => {
+  assert.match(glassSource, /return linear_rgb \/ SPECTRAL_RGB_MEAN;/, 'the weight is not clamped at zero before it scales the path');
+  assert.ok(signedRgb(450)[1] < 0, 'a blue wavelength has a negative green lobe, outside the sRGB gamut');
+  assert.ok(signedRgb(510)[0] < 0, 'a green wavelength has a negative red lobe');
+  const integratorSource = readFileSync(new URL('../src/cycles/integrator.wgsl', import.meta.url), 'utf8');
+  assert.match(integratorSource, /\(value\.x >= 0\.0 \|\| SCENE_HAS_DISPERSION\) && abs\(value\.x\) < 1\.0e30/, 'a negative channel is kept only when the scene has dispersion');
 });
 
 test('the kernel reads dispersion as 20 divided by the Abbe number around the d line', () => {
