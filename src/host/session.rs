@@ -15,7 +15,7 @@ use crate::host::accel::{
 };
 use crate::host::dispatch::{next_tile, DispatchPlanner, TileBudgetPlanner, DISPATCH_BUDGET_SECONDS};
 use crate::host::device::{check_buffer_sizes_fit, failure, layout_entry, open_device, run_in_error_scopes, storage_buffer, storage_entry};
-use crate::host::film::{image_accumulation_bytes, read_accumulation};
+use crate::host::film::{image_accumulation_bytes, read_accumulation, read_film_sums, CausticSplat};
 use crate::host::textures::upload_scene_buffers;
 use crate::{NativeTraceInput, NativeTraceInputV2, ProbeCyclesLobeOptions};
 
@@ -388,6 +388,8 @@ pub(crate) struct CyclesDispatchTarget<'a> {
     pub(crate) bind_group: &'a wgpu::BindGroup,
     pub(crate) parameters: &'a wgpu::Buffer,
     pub(crate) accumulation: &'a wgpu::Buffer,
+    /// Set when the frame light traces caustics: the splat buffer is read back and added to the radiance.
+    pub(crate) caustics: Option<CausticSplat<'a>>,
     pub(crate) device_lost: &'a AtomicBool,
     pub(crate) device_error: &'a Mutex<String>,
     pub(crate) uncaptured_error: &'a Mutex<Option<String>>,
@@ -456,6 +458,7 @@ fn create_cycles_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayo
     layout_entries.push(storage_entry(12, true));  // cycles_lut (read-only: static LUTs, then the two pixel filter tables)
     layout_entries.push(storage_entry(13, true));  // light_tree_emitters
     layout_entries.push(storage_entry(14, true));  // light_to_tree
+    layout_entries.push(storage_entry(15, false)); // caustic_splat (read_write, atomics)
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("cycles path tracer"),
         entries: &layout_entries,
@@ -535,6 +538,7 @@ pub(crate) fn create_cycles_bind_group(
     buffers: &[wgpu::Buffer],
     accumulation: &wgpu::Buffer,
     lut_buffer: &wgpu::Buffer,
+    caustic_splat: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     let mut entries = vec![
         wgpu::BindGroupEntry { binding: 0, resource: parameters.as_entire_binding() },
@@ -560,6 +564,10 @@ pub(crate) fn create_cycles_bind_group(
             resource: buffer.as_entire_binding(),
         });
     }
+    entries.push(wgpu::BindGroupEntry {
+        binding: 15,
+        resource: caustic_splat.as_entire_binding(),
+    });
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("cycles path tracer"),
         layout: bind_group_layout,
@@ -1015,7 +1023,7 @@ pub(crate) fn trace_cycles_samples(
         }
     }
 
-    let sums = read_accumulation(device, queue, target.accumulation, accumulation_bytes);
+    let sums = read_film_sums(device, queue, target.accumulation, accumulation_bytes, target.caustics.as_ref());
     fail_if_dispatch_failed(target, end_sample.saturating_sub(largest_batch), largest_batch, end_sample)?;
     Ok(CyclesTrace {
         sums: sums?,
@@ -1106,7 +1114,7 @@ fn trace_cycles_tiles(
     // Leave the block at the origin for whoever reads it next; every whole-image dispatch writes it again anyway.
     queue.write_buffer(target.parameters, CYCLES_TILE_ORIGIN_BYTE_OFFSET, &[0u8; 8]);
 
-    let sums = read_accumulation(device, queue, target.accumulation, accumulation_bytes);
+    let sums = read_film_sums(device, queue, target.accumulation, accumulation_bytes, target.caustics.as_ref());
     fail_if_dispatch_failed(target, end_sample.saturating_sub(largest_batch), largest_batch, end_sample)?;
     Ok(CyclesTrace {
         sums: sums?,
@@ -1217,6 +1225,8 @@ pub(crate) fn run_cycles_lobe_probe(options: &ProbeCyclesLobeOptions, shader_sou
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
+    // The lobe probe never light traces; the kernel only needs something bound at 15.
+    let caustic_splat = storage_buffer(&device, "dummy caustic splat", &[0u8; 16]);
     let bind_group = with_cycles_cache(|_device, _queue, layout, lut| {
         create_cycles_bind_group(
             &device,
@@ -1226,6 +1236,7 @@ pub(crate) fn run_cycles_lobe_probe(options: &ProbeCyclesLobeOptions, shader_sou
             &buffers,
             &accumulation,
             lut,
+            &caustic_splat,
         )
     })?;
 

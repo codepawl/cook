@@ -95,7 +95,7 @@ Total size: **336 bytes** (`21 × 16 B`), alignment: **16 bytes**.
 | `308` | `4` | `4` | `u32` | `portal_count` | Light portals stored after the `light_count` emitters in the light table (section 6); `0` for none |
 | `312` | `8` | `8` | `vec2<u32>` | `tile_origin` | Pixel origin `[x, y]` of the tile one dispatch covers. The packer writes `[0, 0]`; the host writes it for every dispatch (zero when the frame is not split), so whatever a pack carries here never shifts the picture. `dispatchBudgetMs` splits a frame into tiles; the kernel adds the origin to the global invocation id |
 | `320` | `4` | `4` | `f32` | `aperture_ratio` | Anamorphic bokeh: the width of the aperture over its height (Cycles `aperture_ratio`). The kernel multiplies the lens sample's x by `1 / aperture_ratio`; the packer writes `1.0` by default and accepts `0.01` to `100`; a block with `0.0` here is read as `1.0` |
-| `324` | `4` | `4` | `u32` | `reserved_aperture_0` | Reserved (`0`), pads the block to a multiple of 16 bytes |
+| `324` | `4` | `4` | `u32` | `caustic_photons` | Light paths traced from the emitters per pixel sample (`1` to `64`) while the `kernel_flags` bit `8192=CAUSTIC_LIGHT_TRACING` is set, `0` otherwise. A word of an older block is `0`, so it renders as before. See "Caustic light tracing" in the README |
 | `328` | `4` | `4` | `u32` | `reserved_aperture_1` | Reserved (`0`) |
 | `332` | `4` | `4` | `u32` | `reserved_aperture_2` | Reserved (`0`) |
 

@@ -239,7 +239,7 @@ export function dispersionScene(name, { dispersion = 1, width, height } = {}) {
 }
 
 /** The FORMAT-v2 input Cook traces for a scene description. */
-export function packDispersionScene(description, { samples, seed = 1 }) {
+export function packDispersionScene(description, { samples, seed = 1, options = {} }) {
   const materials = description.objects.map(object => object.material);
   const instances = description.objects.map((object, index) => ({
     geometry: {
@@ -258,5 +258,6 @@ export function packDispersionScene(description, { samples, seed = 1 }) {
     seed,
     bounces: description.bounces,
     backgroundColor: [0, 0, 0],
+    ...options,
   });
 }

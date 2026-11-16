@@ -18,6 +18,9 @@ include!(concat!(env!("OUT_DIR"), "/cycles_manifest_files.rs"));
 // ---- KernelParamsV2 byte offsets (verified against pack-input-v2.mjs and abi.wgsl) ----
 const KERNEL_FLAG_LIGHT_TREE_PROBE: u32 = 128;
 const KERNEL_FLAG_TEXTURE_MIPS: u32 = 2048;
+const KERNEL_FLAG_CAUSTIC_LIGHT_TRACING: u32 = 8192;
+/// Byte offset of `caustic_photons` (u32[81]): light paths per pixel sample while the caustic flag is set.
+const KP_CAUSTIC_PHOTONS_BYTE: usize = 324;
 const KP_KERNEL_FLAGS_BYTE: usize = 32;    // u32[8]
 const KP_ENV_WIDTH_BYTE: usize = 192;      // u32[48]
 const KP_ENV_HEIGHT_BYTE: usize = 196;     // u32[49]
@@ -260,6 +263,19 @@ pub(crate) fn check_update_params_keep_scene_shape(session_kernel_params: &[u8],
         }
     }
     Ok(())
+}
+
+/// How many light paths per pixel sample the frame traces for caustics: the `caustic_photons` word when the frame carries
+/// `KERNEL_FLAG_CAUSTIC_LIGHT_TRACING`, else 0 (no light tracing, no splat buffer, the kernel without the feature).
+pub(crate) fn caustic_photons_for_params(kernel_params: &[u8]) -> u32 {
+    if kernel_params.len() < KP_CAUSTIC_PHOTONS_BYTE + 4 {
+        return 0;
+    }
+    let kernel_flags = read_u32_le(kernel_params, KP_KERNEL_FLAGS_BYTE);
+    if (kernel_flags & KERNEL_FLAG_CAUSTIC_LIGHT_TRACING) == 0 {
+        return 0;
+    }
+    read_u32_le(kernel_params, KP_CAUSTIC_PHOTONS_BYTE)
 }
 
 /// The compute entry point to run for a kernel parameter block: `main`, or `light_tree_probe` when it carries
@@ -564,6 +580,13 @@ pub(crate) fn specialize_kernel_source(source: &str, scene: &SceneSpecialization
     specialize!(F82, has_f82);
     specialize!(NORMAL_MAP, has_normal_map);
     specialize!(TEXTURE_MIPS, (kernel_flags & KERNEL_FLAG_TEXTURE_MIPS) != 0);
+    // A frame setting: without the flag (and a photon count) the light tracing code is dead and the kernel renders what it did before.
+    if caustic_photons_for_params(kp) == 0 {
+        result = result.replace(
+            "const FRAME_HAS_CAUSTIC_LIGHT_TRACING: bool = true;",
+            "const FRAME_HAS_CAUSTIC_LIGHT_TRACING: bool = false;",
+        );
+    }
     // Unlike the other sentinels this one defaults to `false`, so a kernel compiled without specialization reads no extension records.
     if has_diffuse_transmission {
         result = result.replace("const SCENE_HAS_DIFFUSE_TRANSMISSION: bool = false;", "const SCENE_HAS_DIFFUSE_TRANSMISSION: bool = true;");
@@ -904,6 +927,44 @@ const SCENE_HAS_DIFFUSE_TRANSMISSION: bool = false;";
         let scene = scan_scene_specialization(&input);
         assert_eq!(specialize_kernel_source(MIP_TEST_SOURCE, &scene, &without_mips), "const SCENE_HAS_TEXTURE_MIPS: bool = false;");
         assert_eq!(specialize_kernel_source(MIP_TEST_SOURCE, &scene, &with_mips), MIP_TEST_SOURCE);
+    }
+
+    #[test]
+    fn caustic_light_tracing_compiles_in_only_for_a_frame_that_sets_the_flag_and_a_photon_count() {
+        const LIGHT_TRACING_TEST_SOURCE: &str = "const FRAME_HAS_CAUSTIC_LIGHT_TRACING: bool = true;";
+        const OFF_SOURCE: &str = "const FRAME_HAS_CAUSTIC_LIGHT_TRACING: bool = false;";
+        let mat = make_mat(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, -1, -1);
+        let plain = make_kp(0, 0.0, 0, 0, 0.0);
+        let mut traced = make_kp(KERNEL_FLAG_CAUSTIC_LIGHT_TRACING, 0.0, 0, 0, 0.0);
+        traced[KP_CAUSTIC_PHOTONS_BYTE..KP_CAUSTIC_PHOTONS_BYTE + 4].copy_from_slice(&4u32.to_le_bytes());
+        let flag_without_photons = make_kp(KERNEL_FLAG_CAUSTIC_LIGHT_TRACING, 0.0, 0, 0, 0.0);
+        let input = dummy_input(&plain, &mat, &make_default_light(), &make_default_inst());
+        let scene = scan_scene_specialization(&input);
+        assert_eq!(specialize_kernel_source(LIGHT_TRACING_TEST_SOURCE, &scene, &plain), OFF_SOURCE);
+        assert_eq!(specialize_kernel_source(LIGHT_TRACING_TEST_SOURCE, &scene, &flag_without_photons), OFF_SOURCE);
+        assert_eq!(specialize_kernel_source(LIGHT_TRACING_TEST_SOURCE, &scene, &traced), LIGHT_TRACING_TEST_SOURCE);
+        assert_eq!(caustic_photons_for_params(&plain), 0);
+        assert_eq!(caustic_photons_for_params(&traced), 4);
+    }
+
+    /// The kernel and the host must agree on the fixed point scale of the splat buffer, and the camera paths must drop the light
+    /// the photon paths carry only behind the frame flag (so the kernel without it is the one without the feature).
+    #[test]
+    fn the_caustic_light_tracing_code_keeps_its_scale_and_hides_behind_the_frame_flag() {
+        let kernel = assemble_cycles_kernel().expect("the kernel assembles");
+        let scale = crate::host::film::CAUSTIC_FIXED_POINT_SCALE;
+        assert!(kernel.contains(&format!("const LT_FIXED_POINT_SCALE: f32 = {scale:.1};")));
+        assert!(kernel.contains("const KERNEL_FLAG_CAUSTIC_LIGHT_TRACING: u32 = 8192u;"));
+        assert!(kernel.contains("@group(0) @binding(15) var<storage, read_write> caustic_splat: array<atomic<u32>>;"));
+        assert!(kernel.contains("if (FRAME_HAS_CAUSTIC_LIGHT_TRACING && kernel_params.caustic_photons > 0u) {"));
+        assert!(kernel.contains("if (FRAME_HAS_CAUSTIC_LIGHT_TRACING && lt_left_surface_vertex && lt_caster_chain > 0u) {"));
+        assert!(kernel.contains("lt_caster_chain += 1u;"));
+        let photon_start = kernel.find("fn int_trace_caustic_photon(").expect("the photon trace exists");
+        let photon_end = photon_start + kernel[photon_start..].find("\n}\n").expect("the photon trace ends");
+        let photon_body = &kernel[photon_start..photon_end];
+        assert!(photon_body.contains("caster_crossings > 0u && int_closure_has_evaluable_lobe(&closure)"), "only caustics: a path that crossed no caster is direct light");
+        assert!(photon_body.contains("if (!is_thin_walled) {") && photon_body.contains("caster_crossings += 1u;"), "a thin pane is lit by the camera paths' shadow rays, so it is no caster");
+        assert!(photon_body.contains("int_trace_shadow("), "the join to the camera needs a visibility ray");
     }
 
     #[test]

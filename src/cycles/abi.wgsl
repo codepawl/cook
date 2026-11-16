@@ -30,6 +30,7 @@ const BINDING_TEXTURE_DESCRIPTORS: u32 = 8u;
 const BINDING_TEXTURE_TEXELS: u32 = 9u;
 const BINDING_ENVIRONMENT_TEXELS: u32 = 10u;
 const BINDING_FILM_ACCUMULATION: u32 = 11u;
+const BINDING_CAUSTIC_SPLAT: u32 = 15u;
 
 // `KernelParamsV2.kernel_flags` bits.
 const KERNEL_FLAG_USE_LIGHT_TREE: u32 = 1u;
@@ -56,6 +57,12 @@ const KERNEL_FLAG_TEXTURE_MIPS: u32 = 2048u;
 // Set: each vertex traces one shadow ray for one of its direct light samples, picked in proportion to the luminance of the unshadowed
 // contribution, instead of one ray per sample. Same mean, fewer rays. Clear (default): every direct sample gets its own shadow ray.
 const KERNEL_FLAG_SHADOW_RAY_PICK: u32 = 4096u;
+// Set (`caustics: "light-tracing"`): paths also start on the emissive triangles, follow only smooth glass and mirror bounces, and from
+// the first diffuse hit after at least one such bounce are connected to the pinhole camera and splatted into `caustic_splat`
+// (`KernelParamsV2.caustic_photons` paths per pixel sample). The camera paths then drop the same light: a path that leaves a diffuse
+// vertex, crosses a smooth glass or mirror bounce and reaches an emitter counts nothing. Clear (default): none of this exists in the
+// compiled kernel (the host sets `FRAME_HAS_CAUSTIC_LIGHT_TRACING` to false), so the image is the one without the option, bit for bit.
+const KERNEL_FLAG_CAUSTIC_LIGHT_TRACING: u32 = 8192u;
 
 // `KernelParamsV2.filter_type` values.
 const FILTER_BOX: u32 = 0u;
@@ -148,6 +155,8 @@ const SCENE_HAS_FINITE_LIGHTS: bool = true;
 const SCENE_HAS_ENV_IMPORTANCE: bool = true;
 const SCENE_HAS_LIGHT_LINKING: bool = true;
 const SCENE_HAS_LIGHT_TREE: bool = true;
+// Frame setting, not scene: false unless the frame's `kernel_flags` carry KERNEL_FLAG_CAUSTIC_LIGHT_TRACING. `true` is the safe default.
+const FRAME_HAS_CAUSTIC_LIGHT_TRACING: bool = true;
 const LOBE_NONE: u32 = 0u;
 const LOBE_DIFFUSE: u32 = 1u;
 const LOBE_GLOSSY_GGX: u32 = 2u;
@@ -251,7 +260,8 @@ struct KernelParamsV2 {
 
   // Anamorphic bokeh: the aperture width over its height (Cycles `aperture_ratio`); `0.0` is read as `1.0`.
   aperture_ratio: f32,
-  reserved_aperture_0: u32,
+  // Light paths traced per pixel sample when KERNEL_FLAG_CAUSTIC_LIGHT_TRACING is set (1 to 64); `0` otherwise.
+  caustic_photons: u32,
   reserved_aperture_1: u32,
   reserved_aperture_2: u32,
 }
@@ -599,6 +609,8 @@ struct ClosureSample {
 @group(0) @binding(12) var<storage, read> cycles_lut: array<u32>;
 @group(0) @binding(13) var<storage, read> light_tree_emitters: array<LightTreeEmitter>;
 @group(0) @binding(14) var<storage, read> light_to_tree: array<u32>;
+// Caustic light tracing: four u32 per pixel (red, green, blue, unused), fixed point with `LT_FIXED_POINT_SCALE`, summed with atomicAdd.
+@group(0) @binding(15) var<storage, read_write> caustic_splat: array<atomic<u32>>;
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Cross-lane closure interface contract (defined in Lane L4 `src/cycles/closure.wgsl`, called by Lane L3 integrator)

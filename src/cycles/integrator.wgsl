@@ -933,6 +933,271 @@ fn int_accumulate_volume_direct_sample(
   *radiance += int_clamp_contribution(unshadowed * visibility, i32(bounce));
 }
 
+// ---- Caustic light tracing (KERNEL_FLAG_CAUSTIC_LIGHT_TRACING) -------------------------------------------------------------------
+// A light path starts on an emissive triangle (chosen by the emissive CDF, a point uniform in area, a cosine direction on a random
+// side), follows only smooth glass and mirror bounces (the samples `int_is_singular_bsdf_sample` calls singular) and at every vertex
+// with a non-singular lobe joins the pinhole camera, if the path crossed at least one non-thin-walled caster. The contribution is
+// splatted into `caustic_splat`. A path that meets a rough or diffuse lobe by sampling ends there. The camera paths in `main` drop
+// the light that these paths carry (a diffuse vertex, then a smooth caster, then an emitter), so no light counts twice. There is no
+// MIS between the two: the camera path's chance to find a small emitter through glass is what light tracing replaces.
+
+const LT_FIXED_POINT_SCALE: f32 = 4096.0;
+// One photon adds at most this much to a channel of a pixel, before the fixed point scale; a firefly past it is cut, not wrapped.
+const LT_MAX_CHANNEL_CONTRIBUTION: f32 = 65536.0;
+const LT_MAX_VERTICES: u32 = 24u;
+
+fn lt_draw(photon_key: vec3<u32>, draw_counter: ptr<function, u32>) -> vec4<f32> {
+  let words = smp_pcg4d(vec4<u32>(photon_key.x, photon_key.y, photon_key.z, *draw_counter + 0x1B873593u));
+  *draw_counter += 1u;
+  return vec4<f32>(
+    smp_word_to_unit_float(words.x),
+    smp_word_to_unit_float(words.y),
+    smp_word_to_unit_float(words.z),
+    smp_word_to_unit_float(words.w),
+  );
+}
+
+struct LtCameraConnection {
+  valid: bool,
+  pixel_x: u32,
+  pixel_y: u32,
+  // Direction from the surface point to the camera and the distance to it.
+  to_camera: vec3<f32>,
+  distance: f32,
+  // Radiance times this and the number of photons gives the pixel value: the area of the surface per unit of raster area.
+  area_weight: f32,
+}
+
+// Where a surface point lands on the image of the pinhole camera `cam_generate_ray` builds, and how much surface area a unit of
+// raster area covers there (the pixel is one unit). Not valid behind the camera, outside the frame or outside the clip planes.
+fn lt_camera_connection(position: vec3<f32>, geometric_normal: vec3<f32>) -> LtCameraConnection {
+  var connection: LtCameraConnection;
+  connection.valid = false;
+  let offset_to_camera = kernel_params.camera_position - position;
+  let distance = length(offset_to_camera);
+  if (distance <= 1.0e-6) {
+    return connection;
+  }
+  let to_camera = offset_to_camera / distance;
+  let view = -to_camera;
+  let forward = cam_safe_unit_axis(kernel_params.camera_forward, vec3<f32>(0.0, 0.0, -1.0));
+  let depth_cosine = dot(view, forward);
+  if (depth_cosine <= 1.0e-6) {
+    return connection;
+  }
+  let depth = distance * depth_cosine;
+  let near_plane = max(kernel_params.camera_near, 0.0);
+  if (depth < near_plane || (kernel_params.camera_far > kernel_params.camera_near && depth > kernel_params.camera_far)) {
+    return connection;
+  }
+  let right_axis = kernel_params.camera_right;
+  let up_axis = kernel_params.camera_up;
+  let right_length_sq = max(dot(right_axis, right_axis), 1.0e-20);
+  let up_length_sq = max(dot(up_axis, up_axis), 1.0e-20);
+  let sensor_x = dot(view, right_axis) / (depth_cosine * right_length_sq);
+  let sensor_y = dot(view, up_axis) / (depth_cosine * up_length_sq);
+  let width = f32(kernel_params.image_width);
+  let height = f32(kernel_params.image_height);
+  let raster_x = (sensor_x - 2.0 * kernel_params.lens_shift.x + 1.0) * 0.5 * width;
+  let raster_y = (1.0 - sensor_y + 2.0 * kernel_params.lens_shift.y) * 0.5 * height;
+  if (!(raster_x >= 0.0 && raster_x < width && raster_y >= 0.0 && raster_y < height)) {
+    return connection;
+  }
+  let surface_cosine = abs(dot(geometric_normal, to_camera));
+  // dA = d(solid angle) * dist^2 / cos(surface); d(solid angle) = |right| |up| / |w|^3 d(sensor), |w| = 1 / depth_cosine, and one raster
+  // unit is (2 / width) * (2 / height) of sensor area.
+  let area_weight = surface_cosine * width * height
+    / (4.0 * sqrt(right_length_sq) * sqrt(up_length_sq) * depth_cosine * depth_cosine * depth_cosine * distance * distance);
+  connection.valid = area_weight > 0.0 && area_weight < 1.0e30;
+  connection.pixel_x = u32(raster_x);
+  connection.pixel_y = u32(raster_y);
+  connection.to_camera = to_camera;
+  connection.distance = distance;
+  connection.area_weight = area_weight;
+  return connection;
+}
+
+fn lt_splat(pixel_x: u32, pixel_y: u32, value: vec3<f32>, rounding: vec3<f32>) {
+  let clean = clamp(int_sanitize_radiance(value), vec3<f32>(0.0), vec3<f32>(LT_MAX_CHANNEL_CONTRIBUTION));
+  // Stochastic rounding keeps the sum unbiased for contributions below one fixed point step.
+  let fixed = vec3<u32>(floor(clean * LT_FIXED_POINT_SCALE + rounding));
+  let base = (pixel_y * kernel_params.image_width + pixel_x) * 4u;
+  atomicAdd(&caustic_splat[base], fixed.x);
+  atomicAdd(&caustic_splat[base + 1u], fixed.y);
+  atomicAdd(&caustic_splat[base + 2u], fixed.z);
+}
+
+fn int_trace_caustic_photon(pixel_x: u32, pixel_y: u32, sample_index: u32, photon_index: u32) {
+  let emitter_count = kernel_params.emissive_triangle_count;
+  if (!SCENE_HAS_EMISSIVE_TRIANGLES || emitter_count == 0u) {
+    return;
+  }
+  let photons_per_sample = kernel_params.caustic_photons;
+  let photon_key = vec3<u32>(
+    pixel_x ^ (kernel_params.seed * 0x9E3779B9u + 0x68E31DA4u),
+    pixel_y ^ (kernel_params.seed * 0x85EBCA6Bu + 0x3C6EF372u),
+    sample_index * photons_per_sample + photon_index,
+  );
+  var draw_counter = 0u;
+  let pick = lt_draw(photon_key, &draw_counter);
+  let emitter_index = lgt_binary_search_emissive_cdf(pick.x, emitter_count);
+  let emitter = emissive_triangles[emitter_index];
+  if (emitter.selection_pdf <= 0.0 || emitter.area <= 0.0) {
+    return;
+  }
+  let sqrt_u = sqrt(pick.y);
+  let bary_u = 1.0 - sqrt_u;
+  let bary_v = pick.z * sqrt_u;
+  let start = emitter.p0 + emitter.edge1 * bary_u + emitter.edge2 * bary_v;
+
+  // Both faces emit (a light sample uses |cos|), so a face is chosen at random and the direction pdf is cos / (2 pi).
+  let direction_draw = lt_draw(photon_key, &draw_counter);
+  let emitter_normal = emitter.geometric_normal * select(-1.0, 1.0, direction_draw.z < 0.5);
+  var tangent = vec3<f32>(0.0);
+  var bitangent = vec3<f32>(0.0);
+  lgt_make_orthonormal_basis(emitter_normal, &tangent, &bitangent);
+  let disk_radius = sqrt(direction_draw.x);
+  let disk_angle = TWO_PI * direction_draw.y;
+  let first_direction = normalize(
+    tangent * (disk_radius * cos(disk_angle))
+      + bitangent * (disk_radius * sin(disk_angle))
+      + emitter_normal * sqrt(max(1.0 - direction_draw.x, 1.0e-8)),
+  );
+
+  let emitter_material = materials[emitter.material_index];
+  var emitted = emitter.radiance;
+  if (SCENE_HAS_EMISSION_MAP && emitter_material.emission_tex >= 0) {
+    emitted = lgt_textured_emitter_radiance(emitter, bary_u, bary_v);
+  }
+  var throughput = emitted * (emitter.area * TWO_PI / emitter.selection_pdf);
+
+  var wavelength_um = SPECTRAL_D_LINE_UM;
+  var has_spectral_weight = false;
+  if (SCENE_HAS_DISPERSION) {
+    wavelength_um = spectral_wavelength_um(lt_draw(photon_key, &draw_counter).x);
+  }
+
+  let photon_total = f32(kernel_params.image_width) * f32(kernel_params.image_height)
+    * f32(max(kernel_params.total_samples, 1u)) * f32(max(photons_per_sample, 1u));
+  let visibility_mask = INSTANCE_VISIBILITY_DIFFUSE | INSTANCE_VISIBILITY_GLOSSY | INSTANCE_VISIBILITY_TRANSMISSION;
+
+  var ray_origin = start;
+  var ray_dir = first_direction;
+  var ray_t_min = 0.0;
+  var self_instance = emitter.instance_index;
+  var self_triangle = emitter.triangle_index;
+  var caster_crossings = 0u;
+  var medium_sigma = vec3<f32>(0.0);
+  var in_medium = false;
+  var medium_stack_instances: array<u32, 4>;
+  var medium_stack_sigmas: array<vec3<f32>, 4>;
+  var medium_stack_depth = 0u;
+
+  for (var vertex = 0u; vertex < LT_MAX_VERTICES; vertex += 1u) {
+    let surface_hit = int_trace_closest_surface(ray_origin, ray_dir, ray_t_min, 1.0e30, visibility_mask, self_instance, self_triangle);
+    if (surface_hit.hit == 0u) {
+      return;
+    }
+    if (in_medium) {
+      throughput *= exp(-medium_sigma * max(surface_hit.t - ray_t_min, 0.0));
+    }
+    let wo = -ray_dir;
+    var point = int_build_shading_point(surface_hit, wo, vec2<f32>(0.0));
+    var closure = closure_build(&point, wo, wavelength_um);
+    let material = materials[point.material_index];
+    let is_dispersive_glass = SCENE_HAS_DISPERSION
+      && (material.transmission_weight > 0.0 || material.transmission_tex >= 0)
+      && (material.flags & MATERIAL_FLAG_THIN_WALLED) == 0u
+      && closure_material_dispersion(point.material_index) > 0.0;
+    if (is_dispersive_glass && !has_spectral_weight) {
+      throughput *= spectral_rgb_weight(wavelength_um);
+      has_spectral_weight = true;
+    }
+    if (closure.lobe_count == 0u || closure.total_sample_weight <= 0.0) {
+      return;
+    }
+
+    if (caster_crossings > 0u && int_closure_has_evaluable_lobe(&closure)) {
+      let connection = lt_camera_connection(point.position, point.geometric_normal);
+      let receives_light = lgt_links_match(
+        point.light_group_mask_lo,
+        point.light_group_mask_hi,
+        emitter.light_group_mask_lo,
+        emitter.light_group_mask_hi,
+      );
+      if (connection.valid && receives_light) {
+        let bsdf = closure_eval(&closure, wo, connection.to_camera);
+        if (bsdf.value.x > 0.0 || bsdf.value.y > 0.0 || bsdf.value.z > 0.0) {
+          let shadow_origin = int_ray_offset_origin(&point, connection.to_camera);
+          let camera_visibility = int_trace_shadow(
+            shadow_origin,
+            connection.to_camera,
+            connection.distance,
+            point.instance_index,
+            point.triangle_index,
+            INVALID_INDEX,
+            INVALID_INDEX,
+            0u,
+          );
+          let contribution = throughput * bsdf.value * camera_visibility * (connection.area_weight / photon_total);
+          if (contribution.x > 0.0 || contribution.y > 0.0 || contribution.z > 0.0) {
+            lt_splat(connection.pixel_x, connection.pixel_y, contribution, lt_draw(photon_key, &draw_counter).xyz);
+          }
+        }
+      }
+    }
+
+    let step_draw = lt_draw(photon_key, &draw_counter);
+    let bsdf_sample = closure_sample(&closure, wo, step_draw.xyz);
+    if (bsdf_sample.pdf <= 0.0 || (bsdf_sample.eval.x <= 0.0 && bsdf_sample.eval.y <= 0.0 && bsdf_sample.eval.z <= 0.0)) {
+      return;
+    }
+    if (bsdf_sample.sampled_lobe_type == LOBE_TRANSPARENT) {
+      throughput *= bsdf_sample.eval / bsdf_sample.pdf;
+      ray_t_min = surface_hit.t + max(kernel_params.ray_epsilon, 1.0e-6);
+      self_instance = point.instance_index;
+      self_triangle = point.triangle_index;
+      continue;
+    }
+    if (!int_is_singular_bsdf_sample(&closure, &point, bsdf_sample)) {
+      return;
+    }
+    throughput *= bsdf_sample.eval / bsdf_sample.pdf;
+
+    let is_thin_walled = (material.flags & MATERIAL_FLAG_THIN_WALLED) != 0u;
+    let cos_ng_wi = dot(point.geometric_normal, bsdf_sample.wi);
+    let is_transmission = (bsdf_sample.sampled_lobe_type == LOBE_GLASS_GGX || bsdf_sample.sampled_lobe_type == LOBE_GLOSSY_GGX)
+      && cos_ng_wi < 0.0;
+    if (!is_thin_walled) {
+      caster_crossings += 1u;
+      if (is_transmission) {
+        if (point.front_face != 0u) {
+          int_medium_stack_push(
+            &medium_stack_instances,
+            &medium_stack_sigmas,
+            &medium_stack_depth,
+            point.instance_index,
+            max(closure.absorption_sigma, vec3<f32>(0.0)),
+          );
+        } else {
+          int_medium_stack_remove(&medium_stack_instances, &medium_stack_sigmas, &medium_stack_depth, point.instance_index);
+        }
+        if (medium_stack_depth > 0u) {
+          medium_sigma = medium_stack_sigmas[medium_stack_depth - 1u];
+        } else {
+          medium_sigma = vec3<f32>(0.0);
+        }
+        in_medium = medium_sigma.x > 0.0 || medium_sigma.y > 0.0 || medium_sigma.z > 0.0;
+      }
+    }
+    ray_origin = int_ray_offset_origin(&point, bsdf_sample.wi);
+    ray_dir = bsdf_sample.wi;
+    ray_t_min = 0.0;
+    self_instance = point.instance_index;
+    self_triangle = point.triangle_index;
+  }
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let pixel_x = global_id.x + kernel_params.tile_origin.x;
@@ -1016,6 +1281,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var prev_recv_hi = 0xFFFFFFFFu;
   var terminate_on_hit = false;
   var terminate_on_next_surface = false;
+  // Caustic light tracing: whether the path left a surface vertex with a non-singular lobe, and how many smooth casters (not thin
+  // sheets) it crossed since. An emitter reached with both set is the light the photon paths carry, so it counts nothing here.
+  var lt_left_surface_vertex = false;
+  var lt_caster_chain = 0u;
 
   var bounce = 0u;
   var diffuse_bounces = 0u;
@@ -1077,6 +1346,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       prev_recv_hi = 0xFFFFFFFFu;
       terminate_on_hit = false;
       terminate_on_next_surface = false;
+      lt_left_surface_vertex = false;
+      lt_caster_chain = 0u;
 
       bounce = 0u;
       diffuse_bounces = 0u;
@@ -1093,6 +1364,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       first_background_coverage = 0.0;
       path_step = 0u;
       path_active = true;
+
+      if (FRAME_HAS_CAUSTIC_LIGHT_TRACING && kernel_params.caustic_photons > 0u) {
+        for (var photon_index = 0u; photon_index < kernel_params.caustic_photons; photon_index += 1u) {
+          int_trace_caustic_photon(pixel_x, pixel_y, sample_index, photon_index);
+        }
+      }
     }
 
     for (var iteration_step = 0u; iteration_step < steps_per_iteration; iteration_step += 1u) {
@@ -1213,6 +1490,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         prev_recv_lo = 0xFFFFFFFFu;
         prev_recv_hi = 0xFFFFFFFFu;
         lgt_remember_volume_mis_origin(scatter_pos, ray_dir);
+        lt_left_surface_vertex = false;
+        lt_caster_chain = 0u;
         path_active = true;
         continue;
       }
@@ -1275,7 +1554,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       }
 
       if (closure.emission.x > 0.0 || closure.emission.y > 0.0 || closure.emission.z > 0.0) {
-        let emission_weight = lgt_emissive_surface_weight(
+        var emission_weight = lgt_emissive_surface_weight(
           point.emissive_index,
           surface_hit.t,
           ray_dir,
@@ -1285,6 +1564,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           prev_recv_lo,
           prev_recv_hi,
         );
+        if (FRAME_HAS_CAUSTIC_LIGHT_TRACING && lt_left_surface_vertex && lt_caster_chain > 0u) {
+          emission_weight = 0.0;
+        }
         if (emission_weight > 0.0) {
           sample_radiance += int_clamp_contribution(throughput * closure.emission * emission_weight, i32(bounce) - 1);
         }
@@ -1402,6 +1684,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
       let is_singular = int_is_singular_bsdf_sample(&closure, &point, bsdf_sample);
       throughput *= bsdf_sample.eval / bsdf_sample.pdf;
+      if (FRAME_HAS_CAUSTIC_LIGHT_TRACING) {
+        if (!is_singular) {
+          lt_left_surface_vertex = true;
+          lt_caster_chain = 0u;
+        } else if ((material.flags & MATERIAL_FLAG_THIN_WALLED) == 0u) {
+          lt_caster_chain += 1u;
+        }
+      }
 
       bounce += 1u;
       let cos_ng_wi = dot(point.geometric_normal, bsdf_sample.wi);

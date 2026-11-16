@@ -44,12 +44,83 @@ pub(crate) fn texel_workgroups(count: u32) -> (u32, u32) {
     (groups_x, groups_y)
 }
 
+/// Must match `LT_FIXED_POINT_SCALE` in integrator.wgsl: the splat buffer holds the photon contributions times this.
+pub(crate) const CAUSTIC_FIXED_POINT_SCALE: f32 = 4096.0;
+
+/// The caustic splat buffer of a film and what the host needs to turn it into radiance.
+pub(crate) struct CausticSplat<'a> {
+    pub(crate) buffer: &'a wgpu::Buffer,
+    pub(crate) pixel_count: u64,
+    pub(crate) photons_per_sample: u32,
+    /// The `total_samples` the kernel divided every photon by.
+    pub(crate) planned_samples: u32,
+}
+
+/// Four u32 per pixel (red, green, blue and one unused word).
+pub(crate) fn caustic_splat_bytes(width: u32, height: u32) -> u64 {
+    width as u64 * height as u64 * 16
+}
+
 pub(crate) fn read_accumulation(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     accumulation: &wgpu::Buffer,
     accumulation_bytes: u64,
 ) -> Result<Vec<f32>> {
+    read_buffer_words::<f32>(device, queue, accumulation, accumulation_bytes)
+}
+
+/// The film sums, with the caustic splats added to the radiance when the frame light traced.
+pub(crate) fn read_film_sums(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    accumulation: &wgpu::Buffer,
+    accumulation_bytes: u64,
+    caustics: Option<&CausticSplat<'_>>,
+) -> Result<Vec<f32>> {
+    let mut sums = read_accumulation(device, queue, accumulation, accumulation_bytes)?;
+    if let Some(splat) = caustics {
+        let splat_words = read_buffer_words::<u32>(device, queue, splat.buffer, splat.pixel_count * 16)?;
+        add_caustic_splat(&mut sums, &splat_words, splat.pixel_count, splat.photons_per_sample, splat.planned_samples);
+    }
+    Ok(sums)
+}
+
+/// Adds the splatted photons to the radiance sums. The kernel divided each photon by the photons it planned
+/// (`pixel_count * planned_samples * photons_per_sample`); the samples actually taken can differ (a time limit, an unfinished
+/// accumulation), so the sum is rescaled to the photons really traced. `resolve_image` divides the radiance of a pixel by its own
+/// sample count, so the mean is multiplied by that count here.
+pub(crate) fn add_caustic_splat(
+    sums: &mut [f32],
+    splat_words: &[u32],
+    pixel_count: u64,
+    photons_per_sample: u32,
+    planned_samples: u32,
+) {
+    let pixel_total = pixel_count as usize;
+    let plane_length = pixel_total * 4;
+    let taken_total: f64 = (0..pixel_total).map(|pixel| sums[3 * plane_length + pixel * 4 + 3] as f64).sum();
+    if taken_total <= 0.0 || photons_per_sample == 0 {
+        return;
+    }
+    let planned_photons = pixel_count as f64 * planned_samples.max(1) as f64;
+    let rescale = planned_photons / taken_total;
+    for pixel in 0..pixel_total {
+        let taken = sums[3 * plane_length + pixel * 4 + 3].max(1.0) as f64;
+        for channel in 0..3 {
+            let fixed_point = splat_words[pixel * 4 + channel] as f64;
+            let mean_radiance = fixed_point / CAUSTIC_FIXED_POINT_SCALE as f64 * rescale;
+            sums[pixel * 4 + channel] += (mean_radiance * taken) as f32;
+        }
+    }
+}
+
+fn read_buffer_words<T: bytemuck::Pod>(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    accumulation: &wgpu::Buffer,
+    accumulation_bytes: u64,
+) -> Result<Vec<T>> {
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
         size: accumulation_bytes,
@@ -67,7 +138,7 @@ pub(crate) fn read_accumulation(
         .slice(..)
         .get_mapped_range()
         .map_err(|error| failure(format!("Could not read the result back: {error}")))?;
-    let sums: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&mapped).to_vec();
+    let sums: Vec<T> = bytemuck::cast_slice::<u8, T>(&mapped).to_vec();
     drop(mapped);
     // Release the one-frame staging buffer now instead of when a later poll collects the dropped handle.
     readback.unmap();
@@ -162,6 +233,31 @@ mod tests {
             0.0, 0.0, 0.0, 0.0,
             0.0, 0.0, 0.0, taken,
         ]
+    }
+
+    #[test]
+    fn a_splat_adds_its_mean_radiance_to_the_pixel_it_landed_in() {
+        // Two pixels of 4 samples each; the kernel planned 4 samples. Pixel 0 holds 2.0 in red (fixed point), pixel 1 nothing.
+        let mut sums = vec![0.0f32; 2 * 16];
+        sums[2 * 12 + 3] = 4.0;
+        sums[2 * 12 + 4 + 3] = 4.0;
+        let mut splat_words = vec![0u32; 8];
+        splat_words[0] = (2.0 * CAUSTIC_FIXED_POINT_SCALE) as u32;
+        add_caustic_splat(&mut sums, &splat_words, 2, 1, 4);
+        let image = resolve_image(&sums, 2);
+        assert!((image.rgba[0] - 2.0).abs() < 1.0e-6, "{:?}", image.rgba);
+        assert_eq!(image.rgba[4], 0.0);
+    }
+
+    #[test]
+    fn a_splat_is_rescaled_when_fewer_samples_were_taken_than_planned() {
+        let mut sums = vec![0.0f32; 16];
+        sums[12 + 3] = 2.0;
+        let mut splat_words = vec![0u32; 4];
+        splat_words[1] = (1.0 * CAUSTIC_FIXED_POINT_SCALE) as u32;
+        add_caustic_splat(&mut sums, &splat_words, 1, 1, 4);
+        let image = resolve_image(&sums, 1);
+        assert!((image.rgba[1] - 2.0).abs() < 1.0e-6, "{:?}", image.rgba);
     }
 
     #[test]
