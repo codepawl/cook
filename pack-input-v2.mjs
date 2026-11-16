@@ -66,6 +66,14 @@ export const KERNEL_FLAG_PATH_REGENERATION = 1024;
 /** Set when any texture of the pool stores mip levels; the kernel then carries a ray footprint (see FORMAT-v2.md). */
 export const KERNEL_FLAG_TEXTURE_MIPS = 2048;
 export const KERNEL_FLAG_SHADOW_RAY_PICK = 4096;
+/** Set by `caustics: "light-tracing"`: see `KERNEL_FLAG_CAUSTIC_LIGHT_TRACING` in abi.wgsl. */
+export const KERNEL_FLAG_CAUSTIC_LIGHT_TRACING = 8192;
+/** `caustics` values: "off" (default) or "light-tracing" (paths from the emitters through glass, connected to the camera). */
+export const VALID_CAUSTICS = Object.freeze(['off', 'light-tracing']);
+export const MAX_CAUSTIC_PHOTONS = 64;
+export const DEFAULT_CAUSTIC_PHOTONS = 1;
+/** Byte offset of `caustic_photons` inside a `KernelParamsV2` buffer (the first word after `aperture_ratio`). */
+export const KERNEL_PARAMS_V2_CAUSTIC_PHOTONS_BYTE_OFFSET = 324;
 
 /** `flags` of a material extension record: the diffuse transmission colour multiplies the base colour. */
 const MATERIAL_EXTENSION_FLAG_TINTS_BASE_COLOR = 1;
@@ -2194,6 +2202,41 @@ export function validateShadowRayPickOption(shadowRayPick, callerName) {
   }
 }
 
+/**
+ * Throws unless `caustics` is undefined, "off" or "light-tracing", and `causticPhotons` is a whole number from 1 to 64 that comes
+ * with "light-tracing". Light tracing needs a perspective camera and fixed sampling (no `noiseThreshold`), which it names.
+ */
+export function validateCausticsOptions(options, callerName) {
+  const { caustics, causticPhotons } = options;
+  if (caustics !== undefined && !VALID_CAUSTICS.includes(caustics)) {
+    throw new RangeError(
+      `${callerName}: \`caustics\` must be "off" (default) or "light-tracing" (paths from the emitters through glass, connected to the camera), got ${JSON.stringify(caustics)}.`
+    );
+  }
+  if (causticPhotons !== undefined) {
+    if (!Number.isInteger(causticPhotons) || causticPhotons < 1 || causticPhotons > MAX_CAUSTIC_PHOTONS) {
+      throw new RangeError(
+        `${callerName}: \`causticPhotons\` must be a whole number from 1 to ${MAX_CAUSTIC_PHOTONS} (light paths per pixel sample), got ${JSON.stringify(causticPhotons)}.`
+      );
+    }
+    if (caustics !== 'light-tracing') {
+      throw new RangeError(
+        `${callerName}: \`causticPhotons\` only applies with \`caustics: "light-tracing"\`; pass that option or remove \`causticPhotons\`.`
+      );
+    }
+  }
+  if (caustics !== 'light-tracing') {
+    return;
+  }
+  if (options.orthographic === true) {
+    throw new RangeError(`${callerName}: \`caustics: "light-tracing"\` connects light paths to a pinhole camera and does not support \`orthographic: true\`; use a perspective camera or remove \`caustics\`.`);
+  }
+  const adaptiveThreshold = Number(options.noiseThreshold ?? options.adaptiveThreshold ?? 0);
+  if (adaptiveThreshold > 0) {
+    throw new RangeError(`${callerName}: \`caustics: "light-tracing"\` splats photons over the whole image, so a pixel cannot stop early; remove \`noiseThreshold\`/\`adaptiveThreshold\` or \`caustics\`.`);
+  }
+}
+
 export function validatePackOptions(options, callerName, requireDimensionsAndSamples = false) {
   if (!options || typeof options !== 'object') {
     throw new TypeError(`${callerName}: \`options\` must be an object.`);
@@ -2215,6 +2258,7 @@ export function validatePackOptions(options, callerName, requireDimensionsAndSam
   resolveSamplingOptions(options, callerName);
   resolveEnvCompensationFraction(options.envCompensation, callerName);
   validateShadowRayPickOption(options.shadowRayPick, callerName);
+  validateCausticsOptions(options, callerName);
   validateDenoiseOption(options.denoise, callerName);
   validateTextureMipsOption(options.textureMips, 'textureMips', callerName);
   validateFilterOptions(options, callerName);
@@ -2652,6 +2696,11 @@ function packKernelParamsV2({
   if (options.shadowRayPick === 'contribution') {
     kernelFlags |= KERNEL_FLAG_SHADOW_RAY_PICK;
   }
+  validateCausticsOptions(options, 'packKernelParamsV2');
+  const causticPhotons = options.caustics === 'light-tracing' ? (options.causticPhotons ?? DEFAULT_CAUSTIC_PHOTONS) : 0;
+  if (causticPhotons > 0) {
+    kernelFlags |= KERNEL_FLAG_CAUSTIC_LIGHT_TRACING;
+  }
 
   const maxBounces = Math.max(0, Math.round(Number(options.bounces ?? options.maxBounces ?? 8)));
   const maxDiffuseBounces = Math.max(0, Math.round(Number(options.diffuseBounces ?? maxBounces)));
@@ -2747,6 +2796,7 @@ function packKernelParamsV2({
   u32[77] = (counts.portalCount ?? 0) >>> 0;
   u32[78] = 0;
   u32[79] = 0;
+  u32[KERNEL_PARAMS_V2_CAUSTIC_PHOTONS_BYTE_OFFSET / 4] = causticPhotons >>> 0;
 
   return new Uint8Array(buffer);
 }

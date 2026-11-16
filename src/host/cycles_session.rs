@@ -12,7 +12,7 @@ use napi::Result;
 use crate::cycles::{
     assemble_cycles_kernel_entry, check_counts_match_kernel_params, check_frame_params_keep_scene_counts,
     check_update_params_keep_scene_shape, scan_scene_specialization, specialize_kernel_source,
-    trace_entry_point_for_params, SceneSpecialization,
+    caustic_photons_for_params, trace_entry_point_for_params, SceneSpecialization,
 };
 use crate::host::accel::{
     build_cycles_acceleration_structure, rebuild_cycles_tlas, tlas_instance_limit, CyclesAcceleration, INSTANCE_RECORD_BYTES,
@@ -21,7 +21,9 @@ use crate::host::cycles_update::{choose_film_use, plan_instance_update, FilmRequ
 use crate::host::capacity::TEXEL_BYTES;
 use crate::host::device::{check_buffer_sizes_fit, failure, run_in_error_scopes, storage_buffer};
 use crate::host::post::PostPipelines;
-use crate::host::film::{image_accumulation_bytes, image_workgroups, read_accumulation};
+use crate::host::film::{
+    caustic_splat_bytes, image_accumulation_bytes, image_workgroups, read_film_sums, CausticSplat,
+};
 use crate::host::session::{
     create_cycles_bind_group, get_cycles_device_context, get_or_compile_cycles_pipeline_on, pipeline_key,
     trace_cycles_samples, validate_cycles_input, validate_kernel_params_v2, validate_light_tree_flag_has_tables,
@@ -123,7 +125,27 @@ struct SessionFilm {
     width: u32,
     height: u32,
     accumulation: wgpu::Buffer,
+    /// Caustic light tracing sums here (four u32 per pixel). One pixel's worth when no frame has asked for it.
+    splat: wgpu::Buffer,
+    splat_is_image_sized: bool,
+    /// What the frame that filled the film traced: photons per pixel sample (0 for none) and the sample count they were divided by.
+    caustic_photons: u32,
+    caustic_planned_samples: u32,
     bind_group: wgpu::BindGroup,
+}
+
+impl SessionFilm {
+    fn caustic_splat(&self) -> Option<CausticSplat<'_>> {
+        if self.caustic_photons == 0 {
+            return None;
+        }
+        Some(CausticSplat {
+            buffer: &self.splat,
+            pixel_count: self.width as u64 * self.height as u64,
+            photons_per_sample: self.caustic_photons,
+            planned_samples: self.caustic_planned_samples,
+        })
+    }
 }
 
 /// Everything on the card. Dropping it frees the card, which is what `close` does.
@@ -478,7 +500,8 @@ impl CyclesSession {
         let compile_seconds = compile_started.elapsed().as_secs_f64();
 
         let upload_started = Instant::now();
-        let film_reused = ensure_film(context, gpu, request.width, request.height)?;
+        let caustic_photons = caustic_photons_for_params(&frame_kernel_params);
+        let film_reused = ensure_film(context, gpu, request.width, request.height, caustic_photons > 0)?;
         let render_parameters =
             patch_render_parameters(&frame_kernel_params, request.width, request.height, film_use.total_samples);
         context.queue.write_buffer(&gpu.parameters, 0, &render_parameters);
@@ -490,6 +513,10 @@ impl CyclesSession {
         // From here the film changes: a call that fails leaves it unusable, so nothing may claim it holds an image.
         self.progressive = None;
         self.film_holds_samples = false;
+        if let Some(held_film) = gpu.film.as_mut() {
+            held_film.caustic_photons = caustic_photons;
+            held_film.caustic_planned_samples = film_use.total_samples;
+        }
 
         let film = gpu.film()?;
         let target = CyclesDispatchTarget {
@@ -499,6 +526,7 @@ impl CyclesSession {
             bind_group: &film.bind_group,
             parameters: &gpu.parameters,
             accumulation: &film.accumulation,
+            caustics: film.caustic_splat(),
             device_lost: &context.device_lost,
             device_error: &context.device_error,
             uncaptured_error: &context.uncaptured_error,
@@ -567,11 +595,12 @@ impl CyclesSession {
                 ))
             }
         };
-        let sums = read_accumulation(
+        let sums = read_film_sums(
             &self.context.device,
             &self.context.queue,
             &film.accumulation,
             image_accumulation_bytes(film.width, film.height),
+            film.caustic_splat().as_ref(),
         )?;
         Ok(CyclesFilmRead {
             sums,
@@ -717,12 +746,23 @@ fn ensure_pipeline(
 }
 
 /// Makes `gpu.film` a film of this size with a bind group over it; true when the previous frame's film was kept.
-fn ensure_film(context: &CyclesDeviceContext, gpu: &mut SessionGpuState, width: u32, height: u32) -> Result<bool> {
-    if gpu.film.as_ref().is_some_and(|film| film.width == width && film.height == height) {
+fn ensure_film(
+    context: &CyclesDeviceContext,
+    gpu: &mut SessionGpuState,
+    width: u32,
+    height: u32,
+    needs_caustic_splat: bool,
+) -> Result<bool> {
+    let kept = gpu.film.as_ref().is_some_and(|film| {
+        film.width == width && film.height == height && (film.splat_is_image_sized || !needs_caustic_splat)
+    });
+    if kept {
         return Ok(true);
     }
-    let (accumulation, bind_group) = run_in_error_scopes(&context.device, "allocating the film", || {
+    let (accumulation, splat, bind_group) = run_in_error_scopes(&context.device, "allocating the film", || {
         let accumulation = create_cycles_film(&context.device, image_accumulation_bytes(width, height));
+        let splat_bytes = if needs_caustic_splat { caustic_splat_bytes(width, height) } else { 16 };
+        let splat = create_cycles_film(&context.device, splat_bytes);
         let bind_group = with_cycles_cache_on(Some(&context.device_lost), |device, _queue, layout, lut| {
             create_cycles_bind_group(
                 device,
@@ -732,11 +772,21 @@ fn ensure_film(context: &CyclesDeviceContext, gpu: &mut SessionGpuState, width: 
                 &gpu.scene_tables,
                 &accumulation,
                 lut,
+                &splat,
             )
         })?;
-        Ok::<_, napi::Error>((accumulation, bind_group))
+        Ok::<_, napi::Error>((accumulation, splat, bind_group))
     })??;
-    gpu.film = Some(SessionFilm { width, height, accumulation, bind_group });
+    gpu.film = Some(SessionFilm {
+        width,
+        height,
+        accumulation,
+        splat,
+        splat_is_image_sized: needs_caustic_splat,
+        caustic_photons: 0,
+        caustic_planned_samples: 0,
+        bind_group,
+    });
     Ok(false)
 }
 
@@ -754,6 +804,7 @@ fn rebind_film(context: &CyclesDeviceContext, gpu: &mut SessionGpuState) -> Resu
             &gpu.scene_tables,
             &film.accumulation,
             lut,
+            &film.splat,
         )
     })?;
     if let Some(film) = gpu.film.as_mut() {
@@ -767,6 +818,7 @@ fn clear_film(context: &CyclesDeviceContext, film: &SessionFilm) {
         label: Some("cycles film clear"),
     });
     encoder.clear_buffer(&film.accumulation, 0, None);
+    encoder.clear_buffer(&film.splat, 0, None);
     context.queue.submit(Some(encoder.finish()));
 }
 
