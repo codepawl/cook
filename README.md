@@ -1,4 +1,13 @@
-# Cook
+<p align="center">
+  <a href="https://crucible.codepawl.com">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://crucible.codepawl.com/brand/crucible-lockup-dark.png">
+      <img alt="Crucible" src="https://crucible.codepawl.com/brand/crucible-lockup.png" width="300">
+    </picture>
+  </a>
+</p>
+
+<h1 align="center">Cook</h1>
 
 ![The Classroom scene path traced by Cook: sunlight through tall windows falls across rows of wooden school desks](docs/media/classroom.jpg)
 
@@ -348,3 +357,25 @@ The pinned wgpu has no TLAS refit (`PreferUpdate` is accepted and rebuilds), so 
 An update that changes a record count (instances, triangles, materials, emissive triangles, lights, light tree nodes, textures), the geometry, the textures, the environment map or which mesh an instance places is refused before anything changes, with an error that names what differs and says to create a new session. Moving an emissive instance means the input carries new `emissiveTriangles` and light tree tables for it, which the update applies like any other table. If the card fails part way through an applied update, the film is cleared and the session is closed (the error says so), so it never renders a half updated scene.
 
 A frame may change these words of the 336 byte block: the camera, lens, aperture and sensor shift (bytes 112 to 191, and the aperture ratio at 320), `seed`, the bounce limits, clamps, filter, adaptive sampling, `film_exposure`, `filter_glossy`, the environment rotation and colour (204, 208), the camera environment strength (304), the fog fields (224 to 267) and `kernel_flags`. The scene-bound words stay with the session (above), until an update brings new selection weights.
+
+<br>
+
+<p align="center">
+  <a href="https://codepawl.com">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/codepawl/.github/main/brand/codepawl-lockup-dark.png">
+      <img alt="CodePawl" src="https://raw.githubusercontent.com/codepawl/.github/main/brand/codepawl-lockup.png" width="160">
+    </picture>
+  </a>
+  <br>
+  <sub>Cook is the path tracer of Crucible, made by CodePawl, an independent 3D studio in Vietnam.</sub>
+  <br>
+  <sub>
+    <a href="https://codepawl.com">Website</a> ·
+    <a href="https://x.com/codepawl">X</a> ·
+    <a href="https://github.com/codepawl">GitHub</a> ·
+    <a href="https://huggingface.co/codepawl">Hugging Face</a> ·
+    <a href="https://www.youtube.com/@codepawlhq">YouTube</a> ·
+    <a href="https://www.threads.com/@codepawl">Threads</a>
+  </sub>
+</p>
