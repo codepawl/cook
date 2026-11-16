@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [pdf-leaf-select, pdf-leaf-select-fixed]
+        variant: [pdf-leaf-select-fixed, pdf-leaf-select-fixed8]
     defaults:
       run:
         shell: bash
