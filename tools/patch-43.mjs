@@ -63,6 +63,17 @@ const VARIANTS = {
   'pdf-no-trail': [sampleOff, [TREE, PDF_GOES_RIGHT, '    let goes_right = false;']],
   'pdf-no-divide': [sampleOff, [TREE, PDF_DIVIDE, '      var minimum_term = 1.0;']],
   'cp-pdf-return-at-leaf': [...ALL_CONST, [TREE, PDF_LEAF, `${PDF_LEAF}      return pdf;\n`]],
+  // Round 4: the leaf block of ltr_pdf loses the device even with constant importance. Cut inside it.
+  'pdf-leaf-break-not-return': [
+    sampleOff,
+    [TREE, '  var pdf = 1.0;\n  var node_index = 0u;\n  for (var level = 0u; level < max_level; level += 1u) {\n    let node = light_tree_nodes[node_index];\n    if (node.left_child < 0) {\n      let emitter_count = min(', '  var pdf = 1.0;\n  var final_pdf = 0.0;\n  var node_index = 0u;\n  for (var level = 0u; level < max_level; level += 1u) {\n    let node = light_tree_nodes[node_index];\n    if (node.left_child < 0) {\n      let emitter_count = min('],
+    [TREE, '      if (!(target_importance.x > 0.0)) {\n        return 0.0;\n      }', '      if (!(target_importance.x > 0.0)) {\n        break;\n      }'],
+    [TREE, '      return pdf * 0.5 * (target_importance.x / total_importance.x + minimum_term);', '      final_pdf = pdf * 0.5 * (target_importance.x / total_importance.x + minimum_term);\n      break;'],
+    [TREE, '    node_index = select(left_index, right_index, goes_right);\n  }\n  return 0.0;\n}\n\n// ---- Test probe', '    node_index = select(left_index, right_index, goes_right);\n  }\n  return final_pdf;\n}\n\n// ---- Test probe'],
+  ],
+  'pdf-leaf-count-one': [sampleOff, [TREE, '      var target_importance = vec2<f32>(0.0);\n      var total_importance', '      let emitter_count_one = 1u;\n      var target_importance = vec2<f32>(0.0);\n      var total_importance'], [TREE, 'emitter_index < emitter_count; emitter_index += 1u) {\n        let slot = node.right_or_first_emitter + emitter_index;\n        let importance = ltr_emitter_importance(slot, position, normal, has_transmission);\n        if (importance.x > 0.0) {\n          emitters_with_importance', 'emitter_index < emitter_count_one; emitter_index += 1u) {\n        let slot = node.right_or_first_emitter + emitter_index;\n        let importance = ltr_emitter_importance(slot, position, normal, has_transmission);\n        if (importance.x > 0.0) {\n          emitters_with_importance']],
+  'pdf-leaf-no-slot-capture': [sampleOff, [TREE, '        if (slot == target_slot) {\n          target_importance = importance;\n        }', '        target_importance = importance;']],
+  'pdf-leaf-no-count': [sampleOff, [TREE, '          emitters_with_importance += 1u;\n', '          total_importance.x += 0.0;\n']],
   'cp-pdf-no-trail': [...ALL_CONST, [TREE, PDF_GOES_RIGHT, '    let goes_right = false;']],
   // The leaf reservoir with its pointer arguments and bit mask.
   'leaf-first-slot': [[TREE, LEAF_BODY, `${LEAF_BODY}  return i32(light_tree_nodes[leaf_index].right_or_first_emitter);\n`]],
