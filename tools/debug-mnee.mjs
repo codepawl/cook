@@ -28,15 +28,43 @@ function meanOfChannels(input, triple) {
   return sums.map((sum) => sum / (WIDTH * HEIGHT));
 }
 
-for (const [label, { name, ...options }] of Object.entries(scenes)) {
+const requested = (process.argv[2] ?? '999,100,6;3,5,7').split(';').map((text) => text.split(',').map(Number));
+const labelsToRun = (process.argv[3] ?? 'ball-raised-low').split(',');
+for (const label of labelsToRun) {
+  const { name, ...options } = scenes[label];
   const input = buildCausticInput(name, { width: WIDTH, height: HEIGHT, samples: SAMPLES, caustics: true, ...options });
-  const rows = [`calls/pixel=${meanOfChannels(input, [999, 0, 0])[0].toFixed(4)}`];
-  for (let first = 0; first < codes.length; first += 3) {
-    const triple = [codes[first], codes[first + 1] ?? 0, codes[first + 2] ?? 0];
+  const rows = [];
+  for (const triple of requested) {
     const means = meanOfChannels(input, triple);
     triple.forEach((code, channel) => {
-      if (code) rows.push(`${NAMES[code]}=${means[channel].toFixed(4)}`);
+      if (code) rows.push(`${NAMES[code] ?? 'calls'}=${means[channel].toFixed(4)}`);
     });
+    console.log(`DEBUG-mnee ${label} ${rows.join(' ')}`);
   }
-  console.log(`DEBUG-mnee ${label} ${rows.join(' ')}`);
+}
+
+// Byte identity: the same plain scene twice, and with the caster bit.
+if (process.argv[4] === 'identity') {
+  const flagWord = 29;
+  const plain = buildCausticInput('ball', { width: 80, height: 45, samples: 48 });
+  const withBit = buildCausticInput('ball', { width: 80, height: 45, samples: 48 });
+  const words = new Uint32Array(withBit.instances.buffer, withBit.instances.byteOffset, withBit.instances.byteLength / 4);
+  words[(1 * withBit.instances.byteLength) / withBit.instanceCount / 4 + flagWord] |= 128;
+  const run = (input) => traceNative(input, { kernel: 'cycles', width: 80, height: 45, samples: 48, denoise: 'none' }).rgba;
+  const differences = (first, second) => {
+    let count = 0;
+    let largest = 0;
+    for (let index = 0; index < first.length; index++) {
+      if (first[index] !== second[index]) {
+        count++;
+        largest = Math.max(largest, Math.abs(first[index] - second[index]));
+      }
+    }
+    return `${count} of ${first.length} floats differ, largest ${largest}`;
+  };
+  const first = run(plain);
+  const second = run(plain);
+  const third = run(withBit);
+  console.log(`DEBUG-identity plain vs plain: ${differences(first, second)}`);
+  console.log(`DEBUG-identity plain vs caster bit: ${differences(first, third)}`);
 }
