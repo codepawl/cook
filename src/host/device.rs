@@ -107,16 +107,24 @@ pub(crate) fn run_in_error_scopes<T>(device: &wgpu::Device, doing: &str, work: i
 pub(crate) const DEVICE_BUFFER_CAP_BYTES: u64 = 1 << 30;
 
 /// The adapter Cook renders on: the high performance Vulkan adapter, or an error that says why there is none.
+/// COOK_WGPU_BACKEND=dx12 asks for the Direct3D 12 fallback adapter (Microsoft WARP) instead: a probe for software CI.
 pub(crate) fn request_adapter() -> Result<wgpu::Adapter> {
+    let use_dx12 = std::env::var("COOK_WGPU_BACKEND").map(|value| value.eq_ignore_ascii_case("dx12")).unwrap_or(false);
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::VULKAN,
+        backends: if use_dx12 { wgpu::Backends::DX12 } else { wgpu::Backends::VULKAN },
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
-    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
+        force_fallback_adapter: use_dx12,
         ..Default::default()
     }))
-    .map_err(|error| failure(format!("No Vulkan adapter: {error}")))
+    .map_err(|error| failure(format!("No {} adapter: {error}", if use_dx12 { "DX12" } else { "Vulkan" })))?;
+    if use_dx12 {
+        let info = adapter.get_info();
+        eprintln!("cook: adapter \"{}\" backend {:?} driver \"{}\" {}", info.name, info.backend, info.driver, info.driver_info);
+    }
+    Ok(adapter)
 }
 
 /// The limits Cook opens the device with, from what the adapter offers.
