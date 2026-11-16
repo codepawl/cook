@@ -58,6 +58,11 @@ export {
 
 const PACKAGE_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const ADDON_PATH = join(PACKAGE_DIRECTORY, 'build', 'render-native.node');
+// A caller that asks for no post stage sees the options it always did: the key is left out, not set to undefined.
+function withPost(options, post) {
+  return post === undefined ? options : { ...options, post };
+}
+
 const VALID_KERNELS = new Set(['legacy', 'cycles']);
 
 /**
@@ -550,7 +555,8 @@ export function resolveSessionFrame(sessionInput, sessionOptions, renderOptions)
   requireHeldCameraMatchesImageSize(kernelParams, width, height, 'NativeSession.render');
   validateProgressiveOptions({ accumulate, targetSamples, samples });
   const post = resolvePostOption(options.post, 'NativeSession.render');
-  return { width, height, samples, samplesPerDispatch, dispatchBudgetMs, maxSeconds, bootstrapKernel, denoise, kernelParams, accumulate, targetSamples, post };
+  const frame = { width, height, samples, samplesPerDispatch, dispatchBudgetMs, maxSeconds, bootstrapKernel, denoise, kernelParams, accumulate, targetSamples };
+  return withPost(frame, post);
 }
 
 const MAX_TARGET_SAMPLES = 16777216;
@@ -681,7 +687,7 @@ export function wrapNativeSession(nativeSession, sessionInput, sessionOptions) {
       const denoise = resolveOptions.denoise ?? sessionOptions.denoise;
       validateDenoiseOption(denoise, 'NativeSession.resolve');
       const post = resolvePostOption(resolveOptions.post ?? sessionOptions.post, 'NativeSession.resolve');
-      const { trace, session } = nativeSession.resolve({ denoise, post });
+      const { trace, session } = nativeSession.resolve(withPost({ denoise }, post));
       return { ...trace, ...session };
     },
     update(newInput) {

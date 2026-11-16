@@ -160,6 +160,15 @@ test('a session frame and a session creation refuse a size at another aspect', (
   assert.equal(frame.width, 320);
 });
 
+// Hosts that wrap a session and compare the options they pass on must see the shape they saw before the post stage.
+test('a session frame without post leaves the post key out, and one with post carries it', () => {
+  const input = decodePackFile(readFileSync(FIXTURE_PATH));
+  const plain = resolveSessionFrame(input, { kernel: 'cycles' }, { width: 320, height: 240, samples: 8 });
+  assert.equal(Object.hasOwn(plain, 'post'), false);
+  const withPost = resolveSessionFrame(input, { kernel: 'cycles' }, { width: 320, height: 240, samples: 8, post: { exposure: 2 } });
+  assert.equal(withPost.post.exposure, 2);
+});
+
 // Item 3, 6: the command line.
 
 test('an output path that is a folder is refused before any work', () => {
