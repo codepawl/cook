@@ -17,6 +17,9 @@ const INSTANCE_TOPOLOGY_FIELDS: [(&str, usize); 4] = [
     ("totalTriangleCount", 108),
 ];
 
+/// The position of the triangle table in the scene buffers; a geometry update replaces it (any length).
+pub(crate) const TRIANGLES_BUFFER_INDEX: usize = 1;
+
 /// The scene tables an update can replace, with the position of each in the buffers `upload_cycles_scene_tables` makes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UpdatableTable {
@@ -71,8 +74,9 @@ fn read_word(bytes: &[u8], offset: usize) -> u32 {
 }
 
 /// Compares a new instance table with the one the session holds. The same instances must stay in the same order with the
-/// same meshes; transforms, materials, colours, visibility and light linking may change.
-pub(crate) fn plan_instance_update(old_table: &[u8], new_table: &[u8]) -> Result<InstanceUpdatePlan> {
+/// same meshes; transforms, materials, colours, visibility and light linking may change. With `meshes_may_change` (a
+/// geometry update brings the triangles too) the mesh fields may change as well, and the TLAS is dirty for any changed instance.
+pub(crate) fn plan_instance_update(old_table: &[u8], new_table: &[u8], meshes_may_change: bool) -> Result<InstanceUpdatePlan> {
     if old_table.len() != new_table.len() || new_table.len() % INSTANCE_RECORD_BYTES != 0 {
         return Err(failure(format!(
             "The new instance table holds {} bytes but the session holds {}. An update keeps the instance count; create a new session to add or remove instances.",
@@ -94,7 +98,7 @@ pub(crate) fn plan_instance_update(old_table: &[u8], new_table: &[u8]) -> Result
         for (field_name, byte_offset) in INSTANCE_TOPOLOGY_FIELDS {
             let old_word = read_word(old_record, byte_offset);
             let new_word = read_word(new_record, byte_offset);
-            if old_word != new_word {
+            if old_word != new_word && !meshes_may_change {
                 return Err(failure(format!(
                     "Instance {instance_index} changes {field_name} from {old_word} to {new_word}. An update may move or restyle an instance but not change which mesh it places; create a new session for this input."
                 )));
@@ -249,7 +253,7 @@ mod tests {
     #[test]
     fn an_identical_instance_table_changes_nothing() {
         let table = instance_table(3);
-        assert_eq!(plan_instance_update(&table, &table.clone()).unwrap(), InstanceUpdatePlan { tlas_dirty: false, changed_instances: 0 });
+        assert_eq!(plan_instance_update(&table, &table.clone(), false).unwrap(), InstanceUpdatePlan { tlas_dirty: false, changed_instances: 0 });
     }
 
     #[test]
@@ -257,7 +261,7 @@ mod tests {
         let old_table = instance_table(3);
         let mut new_table = old_table.clone();
         new_table[INSTANCE_RECORD_BYTES + 12..INSTANCE_RECORD_BYTES + 16].copy_from_slice(&1.5f32.to_le_bytes());
-        let plan = plan_instance_update(&old_table, &new_table).unwrap();
+        let plan = plan_instance_update(&old_table, &new_table, false).unwrap();
         assert_eq!(plan, InstanceUpdatePlan { tlas_dirty: true, changed_instances: 1 });
     }
 
@@ -269,7 +273,7 @@ mod tests {
         restyled[144..148].copy_from_slice(&0.5f32.to_le_bytes()); // object_color
         restyled[48..52].copy_from_slice(&2.0f32.to_le_bytes()); // world_to_object row 0 (the shader reads it, the TLAS does not)
         restyled[116..120].copy_from_slice(&(0x3Fu32 | 64).to_le_bytes()); // the negative scale bit is not a ray mask bit
-        let plan = plan_instance_update(&old_table, &restyled).unwrap();
+        let plan = plan_instance_update(&old_table, &restyled, false).unwrap();
         assert_eq!(plan, InstanceUpdatePlan { tlas_dirty: false, changed_instances: 1 });
     }
 
@@ -278,7 +282,7 @@ mod tests {
         let old_table = instance_table(1);
         let mut hidden = old_table.clone();
         hidden[116..120].copy_from_slice(&0x3Eu32.to_le_bytes());
-        assert!(plan_instance_update(&old_table, &hidden).unwrap().tlas_dirty);
+        assert!(plan_instance_update(&old_table, &hidden, false).unwrap().tlas_dirty);
     }
 
     #[test]
@@ -288,7 +292,7 @@ mod tests {
             let mut new_table = old_table.clone();
             let record = 2 * INSTANCE_RECORD_BYTES + byte_offset;
             new_table[record..record + 4].copy_from_slice(&99u32.to_le_bytes());
-            let message = plan_instance_update(&old_table, &new_table).unwrap_err().to_string();
+            let message = plan_instance_update(&old_table, &new_table, false).unwrap_err().to_string();
             assert!(message.contains("Instance 2"), "{field_name}: {message}");
             assert!(message.contains(field_name), "{field_name}: {message}");
             assert!(message.contains("create a new session"), "{field_name}: {message}");
@@ -296,11 +300,26 @@ mod tests {
     }
 
     #[test]
+    fn a_geometry_update_may_change_the_mesh_an_instance_places() {
+        let old_table = instance_table(3);
+        let mut new_table = old_table.clone();
+        for (_, byte_offset) in INSTANCE_TOPOLOGY_FIELDS {
+            let record = 2 * INSTANCE_RECORD_BYTES + byte_offset;
+            new_table[record..record + 4].copy_from_slice(&99u32.to_le_bytes());
+        }
+        let plan = plan_instance_update(&old_table, &new_table, true).unwrap();
+        assert_eq!(plan.changed_instances, 1);
+        assert!(plan_instance_update(&old_table, &new_table, false).is_err());
+        let message = plan_instance_update(&instance_table(2), &instance_table(3), true).unwrap_err().to_string();
+        assert!(message.contains("instance count"), "{message}");
+    }
+
+    #[test]
     fn another_instance_count_is_refused() {
-        let message = plan_instance_update(&instance_table(2), &instance_table(3)).unwrap_err().to_string();
+        let message = plan_instance_update(&instance_table(2), &instance_table(3), false).unwrap_err().to_string();
         assert!(message.contains("instance count"), "{message}");
         assert!(message.contains("create a new session"), "{message}");
-        assert!(plan_instance_update(&[0u8; 100], &[0u8; 100]).is_err());
+        assert!(plan_instance_update(&[0u8; 100], &[0u8; 100], false).is_err());
     }
 
     #[test]

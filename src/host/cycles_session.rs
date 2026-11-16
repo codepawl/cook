@@ -15,9 +15,12 @@ use crate::cycles::{
     trace_entry_point_for_params, SceneSpecialization,
 };
 use crate::host::accel::{
-    build_cycles_acceleration_structure, rebuild_cycles_tlas, tlas_instance_limit, CyclesAcceleration, INSTANCE_RECORD_BYTES,
+    build_cycles_acceleration_structure, plan_geometry_update, rebuild_cycles_tlas, tlas_instance_limit,
+    update_cycles_geometry, CyclesAcceleration, GeometryUpdatePlan, INSTANCE_RECORD_BYTES, TRIANGLE_RECORD_BYTES,
 };
-use crate::host::cycles_update::{choose_film_use, plan_instance_update, FilmRequest, ProgressiveFilm, UpdatableTable};
+use crate::host::cycles_update::{
+    choose_film_use, plan_instance_update, FilmRequest, ProgressiveFilm, UpdatableTable, TRIANGLES_BUFFER_INDEX,
+};
 use crate::host::capacity::TEXEL_BYTES;
 use crate::host::device::{check_buffer_sizes_fit, failure, run_in_error_scopes, storage_buffer};
 use crate::host::post::PostPipelines;
@@ -57,10 +60,12 @@ pub(crate) struct CyclesRenderRequest<'a> {
 }
 
 /// New values for the scene tables a session holds, with the kernel parameters that go with them. Only the tables that
-/// changed are listed.
+/// changed are listed. `triangles` is a new triangle table of any length (a geometry update): the instance table (the new
+/// one, or the held one) then places the meshes in it, and only the meshes whose triangles changed get a new BLAS.
 pub(crate) struct CyclesSceneUpdate<'a> {
     pub(crate) kernel_params: &'a [u8],
     pub(crate) tables: Vec<(UpdatableTable, &'a [u8])>,
+    pub(crate) triangles: Option<&'a [u8]>,
 }
 
 /// What an update did, so a test or a caller can see it kept the pipeline and the BLAS instead of timing it.
@@ -69,6 +74,8 @@ pub(crate) struct CyclesUpdateReport {
     pub(crate) uploaded_tables: Vec<&'static str>,
     /// The TLAS was rebuilt over the kept BLAS (a transform or ray visibility changed).
     pub(crate) acceleration_rebuilt: bool,
+    /// How many meshes got a new BLAS because their triangles changed (a geometry update).
+    pub(crate) changed_meshes: u32,
     /// How many instance records differ from the old table.
     pub(crate) changed_instances: u32,
     /// The new tables change what the kernel text is specialized for, so the next render compiles it again.
@@ -583,15 +590,18 @@ impl CyclesSession {
         })
     }
 
-    /// Replaces the values of scene tables without rebuilding the pipeline or the BLAS. The tables keep their size and the
-    /// instances their meshes (see `plan_instance_update`); the TLAS is rebuilt only when a transform or a ray visibility
-    /// changed. The film is cleared, since the image it holds no longer shows the scene. Everything is checked before
-    /// anything on the card changes, so a refused update leaves the session as it was.
+    /// Replaces the values of scene tables without rebuilding the pipeline. The tables keep their size; without a new
+    /// triangle table the instances keep their meshes (see `plan_instance_update`) and no BLAS is built, and the TLAS is
+    /// rebuilt only when a transform or a ray visibility changed. With one (`update.triangles`, a geometry update) the
+    /// triangle table may have another length and a mesh another triangle count: only the meshes whose triangles changed
+    /// get a new BLAS and the TLAS is rebuilt. The film is cleared, since the image it holds no longer shows the scene.
+    /// Everything is checked before anything on the card changes, so a refused update leaves the session as it was.
     pub(crate) fn update(&mut self, update: &CyclesSceneUpdate<'_>) -> Result<CyclesUpdateReport> {
         self.fail_if_unusable()?;
         let update_started = Instant::now();
         validate_kernel_params_v2(update.kernel_params)?;
-        check_update_params_keep_scene_shape(&self.session_kernel_params, update.kernel_params)?;
+        let new_triangle_count = update.triangles.map(|bytes| (bytes.len() / TRIANGLE_RECORD_BYTES) as u32);
+        check_update_params_keep_scene_shape(&self.session_kernel_params, update.kernel_params, new_triangle_count)?;
         validate_light_tree_flag_has_tables(update.kernel_params, self.light_tree_node_count, self.has_light_tree_tables)?;
         for (table, bytes) in &update.tables {
             let held_length = self.retained.table_lengths[table.buffer_index()];
@@ -606,13 +616,16 @@ impl CyclesSession {
         let new_instances =
             update.tables.iter().find(|(table, _)| *table == UpdatableTable::Instances).map(|(_, bytes)| *bytes);
         let instance_plan = match new_instances {
-            Some(bytes) => Some(plan_instance_update(&self.retained.instances, bytes)?),
+            Some(bytes) => Some(plan_instance_update(&self.retained.instances, bytes, update.triangles.is_some())?),
             None => None,
         };
 
         // An empty acceleration (no triangles) holds a dummy TLAS that no ray reaches, so there is nothing to rebuild.
-        let held_instance_count = self.gpu.as_ref().ok_or_else(session_closed_failure)?.acceleration.instance_blas_indices.len();
-        let acceleration_rebuilt = held_instance_count > 0 && instance_plan.as_ref().is_some_and(|plan| plan.tlas_dirty);
+        let held_instance_count = self.gpu.as_ref().ok_or_else(session_closed_failure)?.acceleration.instance_mesh_indices.len();
+        let geometry_plan = self.plan_geometry(update, new_instances, held_instance_count)?;
+        let changed_meshes = geometry_plan.as_ref().map_or(0, |plan| plan.changed_mesh_count());
+        let tlas_dirty = instance_plan.as_ref().is_some_and(|plan| plan.tlas_dirty);
+        let acceleration_rebuilt = held_instance_count > 0 && (geometry_plan.is_some() || tlas_dirty);
         if let (true, Some(bytes)) = (acceleration_rebuilt, new_instances) {
             if bytes.len() != held_instance_count * INSTANCE_RECORD_BYTES {
                 return Err(failure(format!(
@@ -625,7 +638,7 @@ impl CyclesSession {
 
         // Past this point the session changes. A step that still fails (a driver or device error) cannot be undone, so the
         // film is cleared and the session closed rather than left half updated.
-        let applied = self.apply_tables(update, new_instances, acceleration_rebuilt);
+        let applied = self.apply_tables(update, geometry_plan, acceleration_rebuilt);
         let (upload_seconds, acceleration_rebuild_seconds) = match applied {
             Ok(seconds) => seconds,
             Err(error) => {
@@ -642,9 +655,14 @@ impl CyclesSession {
         self.scene_specialization = respecialized;
         self.clear_progressive_film();
 
+        let mut uploaded_tables: Vec<&'static str> = update.tables.iter().map(|(table, _)| table.input_name()).collect();
+        if update.triangles.is_some() {
+            uploaded_tables.push("triangles");
+        }
         Ok(CyclesUpdateReport {
-            uploaded_tables: update.tables.iter().map(|(table, _)| table.input_name()).collect(),
+            uploaded_tables,
             acceleration_rebuilt,
+            changed_meshes,
             changed_instances: instance_plan.map_or(0, |plan| plan.changed_instances as u32),
             kernel_respecialized,
             upload_seconds,
@@ -655,11 +673,33 @@ impl CyclesSession {
 }
 
 impl CyclesSession {
-    /// Uploads the new tables, rebuilds the TLAS when asked and rebinds the film; returns the seconds spent uploading and rebuilding.
+    /// Checks a new triangle table against the held meshes, before anything changes. `None` when the update brings none.
+    fn plan_geometry(
+        &self,
+        update: &CyclesSceneUpdate<'_>,
+        new_instances: Option<&[u8]>,
+        held_instance_count: usize,
+    ) -> Result<Option<GeometryUpdatePlan>> {
+        let Some(triangle_bytes) = update.triangles else {
+            return Ok(None);
+        };
+        if held_instance_count == 0 {
+            return Err(failure(
+                "The session holds no meshes (its scene had no instances or no triangles), so there is no geometry to replace. Create a new session for this input.",
+            ));
+        }
+        check_buffer_sizes_fit(&[("triangles", triangle_bytes.len() as u64)], &self.context.device.limits())?;
+        let gpu = self.gpu.as_ref().ok_or_else(session_closed_failure)?;
+        let instances = new_instances.unwrap_or(&self.retained.instances);
+        plan_geometry_update(&gpu.acceleration, instances, triangle_bytes).map(Some)
+    }
+
+    /// Uploads the new tables, rebuilds the BLAS of changed meshes and the TLAS when asked and rebinds the film; returns
+    /// the seconds spent uploading and rebuilding.
     fn apply_tables(
         &mut self,
         update: &CyclesSceneUpdate<'_>,
-        new_instances: Option<&[u8]>,
+        geometry_plan: Option<GeometryUpdatePlan>,
         acceleration_rebuilt: bool,
     ) -> Result<(f64, f64)> {
         let upload_started = Instant::now();
@@ -670,15 +710,24 @@ impl CyclesSession {
             gpu.scene_tables[table.buffer_index()] = storage_buffer(&context.device, &label, bytes);
             self.retained.keep_table(*table, bytes);
         }
+        if let Some(triangle_bytes) = update.triangles {
+            gpu.scene_tables[TRIANGLES_BUFFER_INDEX] = storage_buffer(&context.device, "cycles triangles (updated)", triangle_bytes);
+        }
         let upload_seconds = upload_started.elapsed().as_secs_f64();
 
         let rebuild_started = Instant::now();
-        if let (true, Some(bytes)) = (acceleration_rebuilt, new_instances) {
-            rebuild_cycles_tlas(&context.device, &context.queue, &mut gpu.acceleration, bytes)?;
+        if let Some(plan) = geometry_plan {
+            let acceleration = &mut gpu.acceleration;
+            let instances = &self.retained.instances;
+            run_in_error_scopes(&context.device, "rebuilding the changed meshes", || {
+                update_cycles_geometry(&context.device, &context.queue, acceleration, plan, instances)
+            })??;
+        } else if acceleration_rebuilt {
+            rebuild_cycles_tlas(&context.device, &context.queue, &mut gpu.acceleration, &self.retained.instances)?;
         }
         let acceleration_rebuild_seconds = rebuild_started.elapsed().as_secs_f64();
 
-        if !update.tables.is_empty() {
+        if !update.tables.is_empty() || update.triangles.is_some() {
             rebind_film(context, gpu)?;
         }
         Ok((upload_seconds, acceleration_rebuild_seconds))
