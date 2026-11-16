@@ -109,13 +109,19 @@ fn texture_decode_filtered(color: vec4<f32>, format: u32) -> vec4<f32> {
 
 // The descriptor of one mip level. Level 0 is the texture as the descriptor holds it; each level after it is stored right after
 // the one before it, half as wide and as high (never less than one texel), with the same number of words per texel.
-fn texture_level_descriptor(desc: TextureDescriptor, level: u32, format: u32) -> TextureDescriptor {
+fn texture_next_level_descriptor(level_desc: TextureDescriptor, format: u32) -> TextureDescriptor {
   let words_per_texel = select(1u, 4u, format == 2u);
+  var next_desc = level_desc;
+  next_desc.data_offset = level_desc.data_offset + level_desc.width * level_desc.height * words_per_texel;
+  next_desc.width = max(level_desc.width >> 1u, 1u);
+  next_desc.height = max(level_desc.height >> 1u, 1u);
+  return next_desc;
+}
+
+fn texture_level_descriptor(desc: TextureDescriptor, level: u32, format: u32) -> TextureDescriptor {
   var level_desc = desc;
   for (var skipped = 0u; skipped < level; skipped = skipped + 1u) {
-    level_desc.data_offset = level_desc.data_offset + level_desc.width * level_desc.height * words_per_texel;
-    level_desc.width = max(level_desc.width >> 1u, 1u);
-    level_desc.height = max(level_desc.height >> 1u, 1u);
+    level_desc = texture_next_level_descriptor(level_desc, format);
   }
   return level_desc;
 }
@@ -125,7 +131,7 @@ fn texture_level_descriptor(desc: TextureDescriptor, level: u32, format: u32) ->
 // stored values are blended after the decode of each tap: a blend of two stored sRGB values decodes darker than the light they
 // hold, and nearly every read of a minified map is such a blend.
 fn texture_filter_level(
-  desc: TextureDescriptor,
+  level_desc: TextureDescriptor,
   level: u32,
   format: u32,
   wrap_u: u32,
@@ -133,7 +139,6 @@ fn texture_filter_level(
   u_wrapped: f32,
   v_wrapped: f32,
 ) -> vec4<f32> {
-  let level_desc = texture_level_descriptor(desc, level, format);
   let level_width = i32(level_desc.width);
   let level_height = i32(level_desc.height);
   let level_fx = u_wrapped * f32(level_width) - 0.5;
@@ -161,7 +166,8 @@ fn texture_filter_level(
 }
 
 // Trilinear read for a footprint larger than a texel: the two levels around `level_of_detail` are each filtered and decoded
-// (see texture_filter_level) and blended in linear light.
+// (see texture_filter_level) and blended in linear light. Both levels go through one call inside a loop, so the level filter
+// is compiled once for every texture read of the kernel instead of twice (#1171).
 fn texture_filter_trilinear(
   desc: TextureDescriptor,
   mip_count: u32,
@@ -176,12 +182,26 @@ fn texture_filter_trilinear(
   let lower_level = u32(floor(clamped_detail));
   let upper_level = min(lower_level + 1u, mip_count - 1u);
   let blend = clamped_detail - f32(lower_level);
-  let lower = texture_filter_level(desc, lower_level, format, wrap_u, wrap_v, u_wrapped, v_wrapped);
-  if (upper_level == lower_level) {
-    return lower;
+  var level_desc = texture_level_descriptor(desc, lower_level, format);
+  var blended = vec4<f32>(0.0);
+  var lower = vec4<f32>(0.0);
+  for (var tap = 0u; tap < 2u; tap = tap + 1u) {
+    if (tap == 1u) {
+      level_desc = texture_next_level_descriptor(level_desc, format);
+    }
+    let level = select(lower_level, upper_level, tap == 1u);
+    let filtered = texture_filter_level(level_desc, level, format, wrap_u, wrap_v, u_wrapped, v_wrapped);
+    if (tap == 0u) {
+      lower = filtered;
+      blended = filtered;
+      if (upper_level == lower_level) {
+        break;
+      }
+    } else {
+      blended = mix(lower, filtered, blend);
+    }
   }
-  let upper = texture_filter_level(desc, upper_level, format, wrap_u, wrap_v, u_wrapped, v_wrapped);
-  return mix(lower, upper, blend);
+  return blended;
 }
 
 // The one texture sampler of the kernel: shading (closure_sample_texture), bump, and the alpha tests of the integrator all

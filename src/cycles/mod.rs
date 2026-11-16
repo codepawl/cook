@@ -1818,14 +1818,22 @@ mod tests {
     #[test]
     fn a_mip_level_is_found_by_walking_the_halving_chain_from_level_0() {
         let kernel = assemble_cycles_kernel().expect("the kernel assembles");
-        let walk_start = kernel.find("fn texture_level_descriptor(").expect("the level descriptor walk exists");
+        let walk_start = kernel.find("fn texture_next_level_descriptor(").expect("the level descriptor step exists");
         let walk_end = walk_start + kernel[walk_start..].find("\n}").expect("the walk ends");
         let walk = &kernel[walk_start..walk_end];
         assert!(walk.contains("select(1u, 4u, format == 2u)"));
         assert!(walk.contains("level_desc.width * level_desc.height * words_per_texel"));
         assert!(walk.contains("max(level_desc.width >> 1u, 1u)"));
         assert!(walk.contains("max(level_desc.height >> 1u, 1u)"));
-        assert!(kernel.contains("return mix(lower, upper, blend);"), "two decoded levels blend in linear light");
+        assert!(kernel.contains("blended = mix(lower, filtered, blend);"), "two decoded levels blend in linear light");
+        let trilinear_start = kernel.find("fn texture_filter_trilinear(").expect("the trilinear read exists");
+        let trilinear_end = trilinear_start + kernel[trilinear_start..].find("
+}").expect("the trilinear read ends");
+        assert_eq!(
+            kernel[trilinear_start..trilinear_end].matches("texture_filter_level(").count(),
+            1,
+            "both levels go through one call site, so the level filter is compiled once per texture read (#1171)"
+        );
         let level_start = kernel.find("fn texture_filter_level(").expect("the level filter exists");
         let level_end = level_start + kernel[level_start..].find("\n}").expect("the level filter ends");
         let level_filter = &kernel[level_start..level_end];
