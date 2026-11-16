@@ -131,3 +131,9 @@ jobs:
             echo "The Vulkan validation layer reported an error; see render.log above."
             exit 1
           fi
+      # The flat light pick once rendered garbage (Zen 5) or crashed (Granite Rapids) on lavapipe's AVX-512 code path while the
+      # tree pick stayed correct (#42). The CPU is whatever GitHub assigns, so this catches a return of that bug on AVX-512 runners.
+      - name: Flat and tree light picks agree on lavapipe
+        run: |
+          grep -m1 "model name" /proc/cpuinfo
+          node tools/check-flat-light-pick.mjs

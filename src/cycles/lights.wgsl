@@ -295,19 +295,18 @@ fn lgt_sample_ellipse_point(center: vec3<f32>, axis_u: vec3<f32>, size_u: f32, a
   return center + axis_u * (disk.x * 0.5 * size_u) + axis_v * (disk.y * 0.5 * size_v);
 }
 
+// Both CDF searches run all 24 steps with selects instead of breaking out early. With the early break, llvmpipe (lavapipe)
+// compiles the kernel wrongly for AVX-512 CPUs: garbage radiance on Zen 5, a crash in a masked gather on Granite Rapids (#42).
+// The fixed loop gives the same index on every CPU, and on a GPU 24 steps of a select cost no more than the branchy form.
 fn lgt_binary_search_light_cdf(pick_u: f32, count: u32) -> u32 {
   var low = 0u;
   var high = count - 1u;
   for (var step = 0u; step < 24u; step += 1u) {
-    if (low >= high) {
-      break;
-    }
     let mid = (low + high) >> 1u;
-    if (lights[mid].cdf_upper <= pick_u) {
-      low = mid + 1u;
-    } else {
-      high = mid;
-    }
+    let upper = lights[min(mid, count - 1u)].cdf_upper;
+    let searching = low < high;
+    low = select(low, mid + 1u, searching && upper <= pick_u);
+    high = select(high, mid, searching && !(upper <= pick_u));
   }
   return low;
 }
@@ -316,15 +315,11 @@ fn lgt_binary_search_emissive_cdf(pick_u: f32, count: u32) -> u32 {
   var low = 0u;
   var high = count - 1u;
   for (var step = 0u; step < 24u; step += 1u) {
-    if (low >= high) {
-      break;
-    }
     let mid = (low + high) >> 1u;
-    if (emissive_triangles[mid].cdf_upper <= pick_u) {
-      low = mid + 1u;
-    } else {
-      high = mid;
-    }
+    let upper = emissive_triangles[min(mid, count - 1u)].cdf_upper;
+    let searching = low < high;
+    low = select(low, mid + 1u, searching && upper <= pick_u);
+    high = select(high, mid, searching && !(upper <= pick_u));
   }
   return low;
 }
