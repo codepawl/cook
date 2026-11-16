@@ -202,13 +202,15 @@ fn int_trace_closest_surface(
 
   var current_t_min = initial_t_min;
   let step_eps = max(kernel_params.ray_epsilon, 1.0e-6);
+  // Declared outside the loop: naga resets a ray_query declared inside one with a null constant each pass, which is
+  // invalid SPIR-V. NVIDIA accepts it; Mesa lavapipe loses the device on the first dispatch (#37).
+  var query: ray_query;
 
   for (var pass_step = 0u; pass_step <= int_path_step_limit(); pass_step += 1u) {
     if (current_t_min >= t_max) {
       return result;
     }
 
-    var query: ray_query;
     rayQueryInitialize(&query, scene_tlas, RayDesc(0u, visibility_mask & 0xFFu, current_t_min, t_max, ray_origin, ray_dir));
     while (rayQueryProceed(&query)) {
       let candidate = rayQueryGetCandidateIntersection(&query);
@@ -361,6 +363,8 @@ fn int_trace_shadow(
   let step_eps = max(kernel_params.ray_epsilon, 1.0e-6);
   let shadow_t_max = select(1.0e30, max(max_distance - step_eps, 0.0), max_distance < 1.0e29);
   var transmittance = vec3<f32>(1.0);
+  // At function scope for the same reason as in the closest-hit trace above (#37).
+  var query: ray_query;
 
   if (shadow_t_max > 0.0 && kernel_params.instance_count > 0u && kernel_params.triangle_count > 0u) {
     var current_t_min = 0.0;
@@ -372,7 +376,6 @@ fn int_trace_shadow(
       if (current_t_min >= shadow_t_max) {
         break;
       }
-      var query: ray_query;
       rayQueryInitialize(
         &query,
         scene_tlas,

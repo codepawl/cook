@@ -92,7 +92,7 @@ jobs:
           echo "Running ${#files[@]} Crucible test files"
           node --test "${files[@]}"
 
-  # A one-sample trace of the room fixture on Mesa lavapipe, the software Vulkan adapter of GitHub's free runners (#37).
+  # A trace of the room fixture on Mesa lavapipe, the software Vulkan adapter of GitHub's free runners (#37).
   lavapipe:
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -119,4 +119,15 @@ jobs:
           VK_KHRONOS_VALIDATION_DEBUG_ACTION: VK_DBG_LAYER_ACTION_LOG_MSG
           VK_KHRONOS_VALIDATION_REPORT_FLAGS: error,warn
           VK_KHRONOS_VALIDATION_LOG_FILENAME: stdout
-        run: node bin/cook.mjs render fixtures/room.cookpack --output room.png --width 64 --samples 1 2>&1 | tail -150
+        # The render must finish and the validation layer must report no error. Before #37 naga's invalid SPIR-V for a
+        # ray_query declared in a loop lost the device here on the first dispatch.
+        run: |
+          set -o pipefail
+          node bin/cook.mjs render fixtures/room.cookpack --output room.png --width 64 --samples 4 2>&1 | tee render.log
+          test -s room.png
+          if grep "Validation Error" render.log | grep -v "VUID-vkDestroyDevice-device-05137"; then
+            echo "The Vulkan validation layer reported an error; see render.log above."
+            exit 1
+          fi
+      - name: GPU tests on lavapipe
+        run: node --test tests/gpu
