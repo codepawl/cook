@@ -38,5 +38,5 @@ jobs:
             git checkout -q -- src/cycles
             node tools/patch-42.mjs "$variant"
             node build.mjs > build.log 2>&1 || { echo "build failed for $variant"; tail -20 build.log; continue; }
-            node tools/probe-lavapipe-42.mjs "$variant" 2>&1 | grep -E "^PROBE|Segmentation|signal" || echo "PROBE $variant: process died with exit ${PIPESTATUS[0]}"
+            node tools/probe-lavapipe-42.mjs "$variant" > probe.log 2>&1; status=$?; grep -E "^PROBE" probe.log; echo "PROBE $variant exit $status"
           done
