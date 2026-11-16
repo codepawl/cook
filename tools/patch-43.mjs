@@ -29,6 +29,9 @@ const ALL_CONST = [
   [TREE, LEFT_BODY, ') -> bool {\n  *left_probability_out = 0.5;\n  return true;\n  let left = ltr_child_importance'],
 ];
 
+const PDF_LEAF_LOOP_BODY = '        let slot = node.right_or_first_emitter + emitter_index;\n        let importance = ltr_emitter_importance(slot, position, normal, has_transmission);\n        if (importance.x > 0.0) {\n          emitters_with_importance += 1u;\n        }\n        if (slot == target_slot) {\n          target_importance = importance;\n        }\n        total_importance += importance;\n';
+const PDF_LEAF_SELECT_BODY = '        let slot = node.right_or_first_emitter + emitter_index;\n        let importance = ltr_emitter_importance(slot, position, normal, has_transmission);\n        emitters_with_importance += select(0u, 1u, importance.x > 0.0);\n        target_importance = select(target_importance, importance, slot == target_slot);\n        total_importance += importance;\n';
+
 const VARIANTS = {
   base: [],
   // Control: the tree is dead code, so this must behave like a tree with no emitters.
@@ -78,6 +81,12 @@ const VARIANTS = {
   'pdf-leaf-count-two': [sampleOff, [TREE, '      var target_importance = vec2<f32>(0.0);\n      var total_importance', '      let emitter_count_two = min(emitter_count, 2u);\n      var target_importance = vec2<f32>(0.0);\n      var total_importance'], [TREE, 'emitter_index < emitter_count; emitter_index += 1u) {\n        let slot = node.right_or_first_emitter + emitter_index;\n        let importance = ltr_emitter_importance(slot, position, normal, has_transmission);\n        if (importance.x > 0.0) {\n          emitters_with_importance', 'emitter_index < emitter_count_two; emitter_index += 1u) {\n        let slot = node.right_or_first_emitter + emitter_index;\n        let importance = ltr_emitter_importance(slot, position, normal, has_transmission);\n        if (importance.x > 0.0) {\n          emitters_with_importance']],
   'pdf-leaf-fixed-bound': [sampleOff, [TREE, 'emitter_index < emitter_count; emitter_index += 1u) {\n        let slot = node.right_or_first_emitter + emitter_index;\n        let importance = ltr_emitter_importance(slot, position, normal, has_transmission);\n        if (importance.x > 0.0) {\n          emitters_with_importance', 'emitter_index < 4u; emitter_index += 1u) {\n        if (emitter_index >= emitter_count) {\n          break;\n        }\n        let slot = node.right_or_first_emitter + emitter_index;\n        let importance = ltr_emitter_importance(slot, position, normal, has_transmission);\n        if (importance.x > 0.0) {\n          emitters_with_importance']],
   'pdf-leaf-importance-hoisted': [sampleOff, [TREE, 'let importance = ltr_emitter_importance(slot, position, normal, has_transmission);\n        if (importance.x > 0.0) {\n          emitters_with_importance', 'let importance = vec2<f32>(f32(slot & 1u) + 0.5, 0.25);\n        if (importance.x > 0.0) {\n          emitters_with_importance']],
+  // Round 6: every carried value updated by select on every trip, as in cook#45.
+  'pdf-leaf-select': [sampleOff, [TREE, PDF_LEAF_LOOP_BODY, PDF_LEAF_SELECT_BODY]],
+  'pdf-leaf-select-fixed': [
+    sampleOff,
+    [TREE, 'emitter_index < emitter_count; emitter_index += 1u) {\n' + PDF_LEAF_LOOP_BODY, 'emitter_index < 32u; emitter_index += 1u) {\n        let active = emitter_index < emitter_count;\n' + PDF_LEAF_SELECT_BODY.replace('let slot = node.right_or_first_emitter + emitter_index;', 'let slot = node.right_or_first_emitter + select(0u, emitter_index, active);').replace('let importance = ltr_emitter_importance(slot, position, normal, has_transmission);', 'let importance = select(vec2<f32>(0.0), ltr_emitter_importance(slot, position, normal, has_transmission), active);')],
+  ],
   'cp-pdf-no-trail': [...ALL_CONST, [TREE, PDF_GOES_RIGHT, '    let goes_right = false;']],
   // The leaf reservoir with its pointer arguments and bit mask.
   'leaf-first-slot': [[TREE, LEAF_BODY, `${LEAF_BODY}  return i32(light_tree_nodes[leaf_index].right_or_first_emitter);\n`]],
