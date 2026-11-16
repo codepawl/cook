@@ -73,6 +73,13 @@ const MATERIAL_EXTENSION_FLAG_TINTS_BASE_COLOR = 1;
 const INSTANCE_VISIBILITY_CAMERA = 1;
 const INSTANCE_DEFAULT_VISIBILITY = 1 | 2 | 4 | 8 | 16 | 32;
 const INSTANCE_FLAG_NEGATIVE_SCALE = 64;
+/**
+ * `visibilityFlags` bits of the caustic estimator (FORMAT-v2.md, "Caustic casters and receivers"). A smooth glass caster and a
+ * receiver, both in the scene, switch on manifold next-event estimation of light that reaches the receiver through the caster.
+ */
+export const INSTANCE_FLAG_CAUSTIC_CASTER = 128;
+export const INSTANCE_FLAG_CAUSTIC_RECEIVER = 256;
+const INSTANCE_VISIBILITY_INPUT_MASK = 0x3f | INSTANCE_FLAG_CAUSTIC_CASTER | INSTANCE_FLAG_CAUSTIC_RECEIVER;
 
 const TRIANGLE_FLAG_SMOOTH_NORMALS = 1;
 const TRIANGLE_FLAG_HAS_VERTEX_COLORS = 2;
@@ -3113,7 +3120,7 @@ function packInstancedGeometry(instancesInput, rawMaterials, textureCollector, r
     const decomposed = decomposeAffineMatrix(inst.matrix ?? IDENTITY_MATRIX_4X4);
     const masks = resolveLightMaskWords(inst.lightMask, inst.lightMaskHi);
     const baseVisibility = inst.visibilityFlags !== undefined
-      ? (inst.visibilityFlags & 0x3f)
+      ? (inst.visibilityFlags & INSTANCE_VISIBILITY_INPUT_MASK)
       : INSTANCE_DEFAULT_VISIBILITY;
     const visibilityFlags = (baseVisibility | (decomposed.negativeScale ? INSTANCE_FLAG_NEGATIVE_SCALE : 0)) >>> 0;
 

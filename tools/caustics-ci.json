@@ -1,0 +1,56 @@
+{
+ "ball": {
+  "width": 240,
+  "height": 135,
+  "rungs": [
+   {
+    "caustics": false,
+    "samples": 64
+   },
+   {
+    "caustics": false,
+    "samples": 256
+   },
+   {
+    "caustics": true,
+    "samples": 16
+   },
+   {
+    "caustics": true,
+    "samples": 64
+   },
+   {
+    "caustics": true,
+    "samples": 256
+   }
+  ],
+  "reference": {
+   "width": 48,
+   "height": 27,
+   "samples": 4096
+  }
+ },
+ "prism": {
+  "width": 240,
+  "height": 135,
+  "rungs": [
+   {
+    "caustics": false,
+    "samples": 256
+   },
+   {
+    "caustics": true,
+    "samples": 16
+   },
+   {
+    "caustics": true,
+    "samples": 64
+   },
+   {
+    "caustics": true,
+    "samples": 256
+   }
+  ],
+  "reference": null
+ }
+}

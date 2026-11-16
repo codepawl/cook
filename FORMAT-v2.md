@@ -126,7 +126,7 @@ Both 3×4 affine transforms are stored as three row vectors `row0..row2`: transf
 | `104` | `4` | `4` | `u32` | `opaque_triangle_count` | Count of opaque primitives in BLAS geometry `0`; cutout geometry `1` starts at `triangle_offset + opaque_triangle_count` |
 | `108` | `4` | `4` | `u32` | `total_triangle_count` | Total primitives (`opaque + cutout`) in this mesh BLAS |
 | `112` | `4` | `4` | `u32` | `material_override` | Override material index (e.g. clay pass), or `0xFFFFFFFF` to use `TriangleRecord.material_index` |
-| `116` | `4` | `4` | `u32` | `visibility_flags` | Bitmask: `1=CAMERA`, `2=DIFFUSE`, `4=GLOSSY`, `8=TRANSMISSION`, `16=SHADOW`, `32=VOLUME_SCATTER`, `64=NEGATIVE_SCALE` (`det(M) < 0`) |
+| `116` | `4` | `4` | `u32` | `visibility_flags` | Bitmask: `1=CAMERA`, `2=DIFFUSE`, `4=GLOSSY`, `8=TRANSMISSION`, `16=SHADOW`, `32=VOLUME_SCATTER`, `64=NEGATIVE_SCALE` (`det(M) < 0`), `128=CAUSTIC_CASTER`, `256=CAUSTIC_RECEIVER` (see "Caustic casters and receivers") |
 | `120` | `4` | `4` | `u32` | `light_group_mask_lo` | Low 32 bits of 64-bit receiver light-linking mask (default `0xFFFFFFFF`) |
 | `124` | `4` | `4` | `u32` | `light_group_mask_hi` | High 32 bits of 64-bit receiver light-linking mask (default `0xFFFFFFFF`) |
 | `128` | `4` | `4` | `u32` | `emissive_base_offset` | Base index in `emissive_triangles` for this instance, or `0xFFFFFFFF` if non-emissive |
@@ -397,6 +397,22 @@ A texture stores levels only when `textureMips: true` is passed to the packer (o
 
 
 ---
+
+## 8b. Caustic casters and receivers (`visibility_flags` bits `128` and `256`)
+
+Light from a small emitter that crosses smooth glass before it reaches a diffuse surface converges as speckle: the shadow ray is blocked by the glass, and a path finds the emitter through it with a probability near zero. Two instance bits switch on manifold next-event estimation (`src/cycles/mnee.wgsl`), which solves the refraction through the glass for the light sample a vertex already took:
+
+- `128` `CAUSTIC_CASTER`: the instance is smooth solid glass (transmission above 0.5, roughness 0, not thin-walled, not metallic, no transmission or roughness texture). Mesh winding must point out of the glass.
+- `256` `CAUSTIC_RECEIVER`: the instance takes the light. A diffuse or glossy vertex on it, whose straight shadow ray to a light sample is blocked by a caster, solves a chain receiver, caster, caster, light.
+
+The estimator is on only when the scene has at least one instance of each kind (`SCENE_HAS_CASTERS`); otherwise the kernel, the packed bytes and the image are those of a scene without the bits. A scene with the bits sets `shadowRayPick` to `all` in effect (the kernel ignores `contribution`), so every light sample has its own shadow ray.
+
+What it does and does not cover:
+
+- Chains of two interfaces (a ball, a prism, a slab, a convex lens), one solution per light sample, found by Newton's method from the straight line through the caster. Light that needs more than two interfaces or a second solution is lost (see below).
+- Emitters that a ray can hit and a sample can pick: emissive meshes, area lights, sized point and spot lights and a sun with a disk. Delta lights (a point or sun of radius 0) and the environment map are not covered and keep their old behaviour.
+- To avoid counting the same light twice, a path that leaves a receiver by a diffuse or glossy bounce and then crosses a caster no longer collects emissive-mesh and analytic-light emission. A chain the solver cannot solve therefore loses its light, as in other renderers with this estimator. The environment is never dropped.
+- The density of a light sample is taken per area perpendicular to the ray, exact for a spherical emitter and close for a flat one.
 
 ## 9. Film Accumulation Buffer (`@binding(11)`)
 
