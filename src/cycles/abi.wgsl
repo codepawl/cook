@@ -533,6 +533,13 @@ struct ShadingPoint {
 
   // Width of the ray footprint on the surface in `uv0` units; 0 reads every texture at level 0.
   uv_footprint: f32,
+
+  // The tangent and bitangent of a tangent-space normal map, as Cycles' Normal Map node builds them: from the unnormalised
+  // object-space tangent, vertex normal and handedness, then moved to world space like a normal (inverse transpose) and divided by
+  // the length of the moved vertex normal, so `tangent * x + bitangent * y + shading_normal * z` is that node's result. Zero when
+  // the triangle has no tangents or smooth normals; the map then uses `tangent` and `bitangent`.
+  normal_map_tangent: vec3<f32>,
+  normal_map_bitangent: vec3<f32>,
 }
 
 // Single BSDF lobe parameterized by L4 closure setup.

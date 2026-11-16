@@ -488,10 +488,14 @@ fn int_transform_vector(instance: InstanceRecord, vec_obj: vec3<f32>) -> vec3<f3
   );
 }
 
-fn int_transform_normal(instance: InstanceRecord, normal_obj: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
-  let world_normal = normal_obj.x * instance.world_to_object_row0.xyz
+fn int_transform_normal_unnormalized(instance: InstanceRecord, normal_obj: vec3<f32>) -> vec3<f32> {
+  return normal_obj.x * instance.world_to_object_row0.xyz
     + normal_obj.y * instance.world_to_object_row1.xyz
     + normal_obj.z * instance.world_to_object_row2.xyz;
+}
+
+fn int_transform_normal(instance: InstanceRecord, normal_obj: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
+  let world_normal = int_transform_normal_unnormalized(instance, normal_obj);
   let len = length(world_normal);
   if (len > 1.0e-12) {
     return world_normal / len;
@@ -635,12 +639,31 @@ fn int_build_shading_point(surface_hit: IntSurfaceHit, wo: vec3<f32>, ray_cone: 
     lgt_make_orthonormal_basis(shading_normal, &tangent, &bitangent);
   }
 
+  // Cycles' Normal Map node builds the tilted normal in object space and moves it to world space as a normal, so on a
+  // non-uniformly scaled instance the tilt shrinks along the stretched axes. Moving the object-space tangent and bitangent as
+  // normals gives the same result when the map is read as `tangent * x + bitangent * y + normal * z` (#1111).
+  var normal_map_tangent = vec3<f32>(0.0);
+  var normal_map_bitangent = vec3<f32>(0.0);
+  if ((triangle.flags & TRIANGLE_FLAG_HAS_TANGENTS) != 0u && (triangle.flags & TRIANGLE_FLAG_SMOOTH_NORMALS) != 0u) {
+    let object_tangent = bary_w * triangle.tangent0 + bary_u * triangle.tangent1 + bary_v * triangle.tangent2;
+    let object_normal = bary_w * triangle.n0 + bary_u * triangle.n1 + bary_v * triangle.n2;
+    let object_bitangent = cross(object_normal, object_tangent) * select(1.0, -1.0, triangle.tangent_sign < 0.0);
+    let moved_normal_length = length(int_transform_normal_unnormalized(instance, object_normal));
+    if (moved_normal_length > 1.0e-12) {
+      let orientation = select(-1.0, 1.0, is_front) / moved_normal_length;
+      normal_map_tangent = int_transform_normal_unnormalized(instance, object_tangent) * orientation;
+      normal_map_bitangent = int_transform_normal_unnormalized(instance, object_bitangent) * orientation;
+    }
+  }
+
   var emissive_index = INVALID_INDEX;
   if (instance.emissive_base_offset != INVALID_INDEX && triangle.local_emissive_offset != INVALID_INDEX) {
     emissive_index = instance.emissive_base_offset + triangle.local_emissive_offset;
   }
 
   var point: ShadingPoint;
+  point.normal_map_tangent = normal_map_tangent;
+  point.normal_map_bitangent = normal_map_bitangent;
   point.position = pos_world;
   point.ray_t = surface_hit.t;
   point.geometric_normal = geometric_normal;
