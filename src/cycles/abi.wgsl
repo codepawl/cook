@@ -56,6 +56,8 @@ const KERNEL_FLAG_TEXTURE_MIPS: u32 = 2048u;
 // Set: each vertex traces one shadow ray for one of its direct light samples, picked in proportion to the luminance of the unshadowed
 // contribution, instead of one ray per sample. Same mean, fewer rays. Clear (default): every direct sample gets its own shadow ray.
 const KERNEL_FLAG_SHADOW_RAY_PICK: u32 = 4096u;
+// Set: the pack carries dense grid volumes (`grid_volume_count`, `grid_table_offset`; FORMAT-v2.md, "Grid volumes"). Clear: none, and the kernel is compiled without them.
+const KERNEL_FLAG_HAS_GRID_VOLUME: u32 = 8192u;
 
 // `KernelParamsV2.filter_type` values.
 const FILTER_BOX: u32 = 0u;
@@ -121,6 +123,8 @@ const CLOSURE_CANDIDATE_CAPACITY: u32 = select(MAX_CLOSURE_LOBES, MAX_CLOSURE_CA
 // Scene feature flags. The host rewrites `true` to `false` for features the packed scene never uses,
 // so the guarded code is dead in that pipeline. `true` is the safe default.
 const SCENE_HAS_VOLUME: bool = true;
+// Dense grid volumes. Like the diffuse transmission flag below, `false` is the safe default: only the specialization turns it on.
+const SCENE_HAS_GRID_VOLUME: bool = false;
 const SCENE_HAS_ALPHA_MASK: bool = true;
 const SCENE_HAS_TRANSPARENT: bool = true;
 const SCENE_HAS_GLASS: bool = true;
@@ -251,9 +255,10 @@ struct KernelParamsV2 {
 
   // Anamorphic bokeh: the aperture width over its height (Cycles `aperture_ratio`); `0.0` is read as `1.0`.
   aperture_ratio: f32,
-  reserved_aperture_0: u32,
-  reserved_aperture_1: u32,
-  reserved_aperture_2: u32,
+  // Dense grid volumes: the number of descriptors and the word offset of the first one in `texture_texels`; `0` and `0` for none.
+  grid_volume_count: u32,
+  grid_table_offset: u32,
+  reserved_grid_volume: u32,
 }
 
 // 160 bytes (10 x 16 B), alignment 16 B.
