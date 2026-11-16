@@ -442,7 +442,7 @@ fn mnee_direct_contribution(
   let toward_target = normalize(target_point - vertex_b.position);
   let cos_in_a = dot(toward_receiver, vertex_a.normal);
   let cos_out_a = -dot(a_to_b, vertex_a.normal);
-  let cos_in_b = -dot(a_to_b, vertex_b.normal);
+  let cos_in_b = dot(a_to_b, vertex_b.normal);
   let cos_out_b = dot(toward_target, vertex_b.normal);
   if (cos_in_a <= 1.0e-4 || cos_out_a <= 1.0e-4 || cos_in_b <= 1.0e-4 || cos_out_b <= 1.0e-4) {
     return none;
