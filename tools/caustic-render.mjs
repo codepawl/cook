@@ -30,6 +30,10 @@ const { values, positionals } = parseArgs({
     'sun-radius': { type: 'string', default: String(SUN_RADIUS) },
     box: { type: 'string' },
     storyboard: { type: 'boolean', default: false },
+    'prism-tilt': { type: 'string', default: '0' },
+    'prism-lift': { type: 'string', default: '0' },
+    'no-fill': { type: 'boolean', default: false },
+    'filter-glossy': { type: 'string' },
   },
 });
 const [prefix] = positionals;
@@ -50,7 +54,7 @@ sun.material = { ...sun.material, emission: SUN_EMISSION / (scale * scale) };
 if (values.storyboard) {
   description.camera = { eye: [1.6, 1.1, 1.5], target: [0.35, 0.05, 0], fieldOfViewDegrees: 40 };
   sun.material = { ...sun.material, color: [1, 0.949, 0.863] };
-  description.objects.push({
+  if (!values['no-fill']) description.objects.push({
     name: 'fill',
     geometry: panelGeometry(1.2, 0.8),
     matrix: placement({ turnY: -0.7, translation: [2.0, 2.4, 2.6] }),
@@ -58,9 +62,27 @@ if (values.storyboard) {
   });
 }
 
+// `--prism-lift` raises it further, on an unseen stand, for a longer throw to the floor.
+// A prism of this many degrees of turn around its own axis (z), lifted until its lowest edge rests on the floor. The scene's sun
+// sits high and low in the sky: a flat prism sends that light into total internal reflection and out through its base, so no
+// rainbow reaches the floor. A tilt of -30 degrees puts the entry face at a useful angle.
+const prismTilt = (Number(values['prism-tilt']) * Math.PI) / 180;
+if (prismTilt !== 0) {
+  const prism = description.objects.find(object => object.name === 'prism');
+  const [cosine, sine] = [Math.cos(prismTilt), Math.sin(prismTilt)];
+  const positions = prism.geometry.positions;
+  let lowest = Infinity;
+  for (let index = 0; index < positions.length; index += 3) {
+    lowest = Math.min(lowest, positions[index] * sine + positions[index + 1] * cosine);
+  }
+  prism.matrix = [cosine, sine, 0, 0, -sine, cosine, 0, 0, 0, 0, 1, 0, 0, -lowest + Number(values['prism-lift']), 0, 1];
+}
+
+const extraOptions = values['filter-glossy'] === undefined ? {} : { filterGlossy: Number(values['filter-glossy']) };
 const options = values['light-tracing']
   ? { caustics: 'light-tracing', causticPhotons: Number(values.photons) }
   : {};
+Object.assign(options, extraOptions);
 const input = packDispersionScene(description, { samples, seed: Number(values.seed), options });
 const started = performance.now();
 const traced = traceNative(input, { width, height, samples, kernel: 'cycles' });

@@ -681,6 +681,12 @@ fn int_apply_filter_glossy(closure: ptr<function, Closure>, inv_filter_glossy: f
   for (var i = 0u; i < count; i += 1u) {
     let lobe_type = (*closure).lobes[i].lobe_type;
     if (lobe_type == LOBE_GLOSSY_GGX || lobe_type == LOBE_GLASS_GGX || lobe_type == LOBE_COAT_GGX) {
+      // With caustic light tracing a smooth glass or mirror lobe stays smooth: the light paths follow it exactly, and the camera
+      // paths must see it as singular too, or they would keep a blurred copy of the caustic the light paths already carry.
+      if (FRAME_HAS_CAUSTIC_LIGHT_TRACING && kernel_params.caustic_photons > 0u
+        && bsdf_mf_is_singular((*closure).lobes[i].alpha_x, (*closure).lobes[i].alpha_y)) {
+        continue;
+      }
       (*closure).lobes[i].alpha_x = max(blur_roughness, (*closure).lobes[i].alpha_x);
       (*closure).lobes[i].alpha_y = max(blur_roughness, (*closure).lobes[i].alpha_y);
     }

@@ -13,6 +13,6 @@ for configuration in "$@"; do
   samples="${configuration%%:*}"
   photons="${configuration##*:}"
   ${RUN_PREFIX:-} node tools/caustic-render.mjs \
-    "$output_directory/${width}x${height}-s${samples}-p${photons}" --storyboard --light-tracing \
+    "$output_directory/${width}x${height}-s${samples}-p${photons}" --storyboard --prism-tilt=-30 --prism-lift=0.5 --light-tracing \
     --width "$width" --height "$height" --samples "$samples" --photons "$photons"
 done

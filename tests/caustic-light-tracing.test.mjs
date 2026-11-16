@@ -8,6 +8,7 @@ import {
   KERNEL_PARAMS_V2_CAUSTIC_PHOTONS_BYTE_OFFSET,
   buildNativeInputV2,
 } from '../pack-input-v2.mjs';
+import { dispersionScene, packDispersionScene } from '../tools/dispersion-scenes.mjs';
 import { pinholeCamera } from '../tools/make-fixture-pack.mjs';
 
 const KERNEL_FLAGS_BYTE_OFFSET = 32;
@@ -98,4 +99,18 @@ test('light tracing changes no pixel of a scene without a caster', { skip: addon
   const without = traceNative(packLitFloor({}), options);
   const withLightTracing = traceNative(packLitFloor({ caustics: 'light-tracing', causticPhotons: 2 }), options);
   assert.deepEqual(Buffer.from(withLightTracing.rgba.buffer), Buffer.from(without.rgba.buffer));
+});
+
+// `filterGlossy` blurs a glass lobe a camera path meets after a diffuse bounce. With light tracing that blur would turn the smooth
+// glass into a non-singular lobe: the camera path would then keep a blurred copy of the caustic the light paths already carry.
+// So the blur skips smooth glass, and the setting must not move a light traced image of a scene with only smooth glass.
+test('light tracing keeps smooth glass sharp under filterGlossy, and the blur does change the image without it', { skip: addonMissing }, () => {
+  const render = options => {
+    const description = dispersionScene('prism-floor', { dispersion: 0, width: 48, height: 27 });
+    const input = packDispersionScene(description, { samples: 16, seed: 3, options });
+    return Buffer.from(traceNative(input, { width: 48, height: 27, samples: 16, kernel: 'cycles' }).rgba.buffer);
+  };
+  const traced = { caustics: 'light-tracing', causticPhotons: 2 };
+  assert.deepEqual(render({ ...traced, filterGlossy: 0 }), render({ ...traced, filterGlossy: 1 }));
+  assert.notDeepEqual(render({ filterGlossy: 0 }), render({ filterGlossy: 1 }));
 });
