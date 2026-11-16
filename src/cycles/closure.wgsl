@@ -994,14 +994,36 @@ fn closure_eval_single_lobe(lobe: ptr<function, Lobe>, wi: vec3<f32>, wo: vec3<f
   return BsdfMfEval(vec3<f32>(0.0), 0.0);
 }
 
-// Cycles bump_shadowing_term: a direction below the smooth surface but above a bump-perturbed lobe normal gets no light.
-// Returns false when the lobe must be zeroed. A lobe whose normal equals the smooth normal is never affected.
-fn closure_passes_bump_shadowing(lobe_normal: vec3<f32>, smooth_normal: vec3<f32>, wi: vec3<f32>) -> bool {
+// Cycles bump_shadowing_term (Blender's default bump map correction): a direction below the smooth surface but above a
+// bump-perturbed lobe normal gets no light, and a diffuse lobe is softened towards the smooth terminator by the GGX
+// shadowing term of the bump's tilt, so a tilted normal does not light the part of a curved surface that faces away from
+// the light. Returns the factor for the lobe's value (the pdf is left alone, as Cycles does).
+// A lobe whose normal equals the smooth normal is never affected.
+fn closure_bump_shadowing_weight(lobe_type: u32, lobe_normal: vec3<f32>, smooth_normal: vec3<f32>, wi: vec3<f32>) -> f32 {
   if (all(lobe_normal == smooth_normal)) {
-    return true;
+    return 1.0;
   }
-  let product = dot(smooth_normal, wi) * dot(smooth_normal, lobe_normal) * dot(lobe_normal, wi);
-  return product >= 0.0;
+  let cos_smooth_wi = dot(smooth_normal, wi);
+  let cos_smooth_lobe = dot(smooth_normal, lobe_normal);
+  let product = cos_smooth_wi * cos_smooth_lobe * dot(lobe_normal, wi);
+  if (product < 0.0) {
+    return 0.0;
+  }
+  let is_diffuse = lobe_type == LOBE_DIFFUSE || lobe_type == LOBE_DIFFUSE_TRANSMISSION;
+  if (!is_diffuse) {
+    return 1.0;
+  }
+  let cos_incoming = abs(cos_smooth_wi);
+  let cos_deviation = abs(cos_smooth_lobe);
+  if (cos_deviation >= 1.0 || cos_incoming >= 1.0) {
+    return 1.0;
+  }
+  if (cos_incoming < 1.0e-6) {
+    return 0.0;
+  }
+  let tan2_deviation = 1.0 / (cos_deviation * cos_deviation) - 1.0;
+  let bump_alpha2 = clamp(0.125 * tan2_deviation, 0.0, 1.0);
+  return bsdf_mf_g1(bump_alpha2, cos_incoming);
 }
 
 fn closure_eval(closure: ptr<function, Closure>, wi: vec3<f32>, wo: vec3<f32>) -> ClosureEval {
@@ -1016,12 +1038,16 @@ fn closure_eval(closure: ptr<function, Closure>, wi: vec3<f32>, wo: vec3<f32>) -
     if (lobe_copy.sample_weight <= 0.0 || lobe_copy.lobe_type == LOBE_TRANSPARENT) {
       continue;
     }
-    if (SCENE_HAS_NORMAL_MAP && !closure_passes_bump_shadowing(lobe_copy.normal, (*closure).smooth_normal, wi)) {
-      continue;
+    var bump_shadowing = 1.0;
+    if (SCENE_HAS_NORMAL_MAP) {
+      bump_shadowing = closure_bump_shadowing_weight(lobe_copy.lobe_type, lobe_copy.normal, (*closure).smooth_normal, wi);
+      if (bump_shadowing <= 0.0) {
+        continue;
+      }
     }
     let lobe_prob = lobe_copy.sample_weight * inv_total_w;
     let ev = closure_eval_single_lobe(&lobe_copy, wi, wo);
-    total_value = total_value + ev.value;
+    total_value = total_value + ev.value * bump_shadowing;
     total_pdf = total_pdf + lobe_prob * ev.pdf;
   }
   return ClosureEval(total_value, total_pdf);
