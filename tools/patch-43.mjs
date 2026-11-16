@@ -87,10 +87,7 @@ const VARIANTS = {
     sampleOff,
     [TREE, 'emitter_index < emitter_count; emitter_index += 1u) {\n' + PDF_LEAF_LOOP_BODY, 'emitter_index < 32u; emitter_index += 1u) {\n        let in_range = emitter_index < emitter_count;\n' + PDF_LEAF_SELECT_BODY.replace('let slot = node.right_or_first_emitter + emitter_index;', 'let slot = node.right_or_first_emitter + select(0u, emitter_index, in_range);').replace('let importance = ltr_emitter_importance(slot, position, normal, has_transmission);', 'let importance = select(vec2<f32>(0.0), ltr_emitter_importance(slot, position, normal, has_transmission), in_range);')],
   ],
-  'pdf-leaf-select-fixed8': [sampleOff, [TREE, 'emitter_index < emitter_count; emitter_index += 1u) {
-' + PDF_LEAF_LOOP_BODY, 'emitter_index < 8u; emitter_index += 1u) {
-        let in_range = emitter_index < emitter_count;
-' + PDF_LEAF_SELECT_BODY.replace('let slot = node.right_or_first_emitter + emitter_index;', 'let slot = node.right_or_first_emitter + select(0u, emitter_index, in_range);').replace('let importance = ltr_emitter_importance(slot, position, normal, has_transmission);', 'let importance = select(vec2<f32>(0.0), ltr_emitter_importance(slot, position, normal, has_transmission), in_range);')]],
+  'pdf-leaf-select-fixed8': [sampleOff, [TREE, 'emitter_index < emitter_count; emitter_index += 1u) {\n' + PDF_LEAF_LOOP_BODY, 'emitter_index < 8u; emitter_index += 1u) {\n        let in_range = emitter_index < emitter_count;\n' + PDF_LEAF_SELECT_BODY.replace('let slot = node.right_or_first_emitter + emitter_index;', 'let slot = node.right_or_first_emitter + select(0u, emitter_index, in_range);').replace('let importance = ltr_emitter_importance(slot, position, normal, has_transmission);', 'let importance = select(vec2<f32>(0.0), ltr_emitter_importance(slot, position, normal, has_transmission), in_range);')]],
   'cp-pdf-no-trail': [...ALL_CONST, [TREE, PDF_GOES_RIGHT, '    let goes_right = false;']],
   // The leaf reservoir with its pointer arguments and bit mask.
   'leaf-first-slot': [[TREE, LEAF_BODY, `${LEAF_BODY}  return i32(light_tree_nodes[leaf_index].right_or_first_emitter);\n`]],
