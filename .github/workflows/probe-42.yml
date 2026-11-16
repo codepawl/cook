@@ -1,0 +1,43 @@
+name: probe-42
+on:
+  push:
+    branches: [probe-42-lavapipe-cpu]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        copy: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: rustup toolchain install stable --profile minimal
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-lavapipe-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+      - run: node build.mjs
+      - name: CPU
+        run: |
+          grep -m1 "model name" /proc/cpuinfo
+          grep -m1 -o -w -E "avx512f|avx512bw|avx512vl" /proc/cpuinfo | sort -u | tr '\n' ' '; echo
+          vulkaninfo --summary 2>/dev/null | grep -i -E "deviceName|driverInfo"
+      - name: Default
+        run: node tools/probe-lavapipe-42.mjs default
+      - name: 256-bit vectors
+        env:
+          LP_NATIVE_VECTOR_WIDTH: '256'
+        run: node tools/probe-lavapipe-42.mjs width256
+      - name: SSE4.1 only
+        env:
+          GALLIUM_OVERRIDE_CPU_CAPS: sse4.1
+        run: node tools/probe-lavapipe-42.mjs sse41
