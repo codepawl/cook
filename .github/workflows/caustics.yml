@@ -9,6 +9,7 @@ on:
       - src/cycles/mnee.wgsl
       - src/cycles/integrator.wgsl
       - tools/make-caustic-scene.mjs
+      - tools/debug-mnee.mjs
       - tools/measure-caustics.mjs
       - tools/caustics-ci.json
       - tests/gpu/caustics.test.mjs
@@ -37,6 +38,8 @@ jobs:
           key: cargo-lavapipe-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
       - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
       - run: node build.mjs
+      - name: Why the solver rejects samples (debug)
+        run: node tools/debug-mnee.mjs
       - name: Render the caustic scenes
         run: node tools/measure-caustics.mjs caustics-out tools/caustics-ci.json
       - name: Caustic tests on the GPU path

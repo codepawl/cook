@@ -328,9 +328,24 @@ fn mnee_segment_reaches(start: vec3<f32>, end: vec3<f32>, start_instance: u32, s
   return abs(surface_hit.t - distance_to_end) <= MNEE_SEGMENT_TOLERANCE * distance_to_end + 1.0e-4;
 }
 
-// The light a direct sample brings to the vertex through the glass that blocks the straight shadow ray, with the BSDF, the
-// throughput and the Fresnel and absorption losses applied and no MIS weight (the integrator drops the BSDF-found light through
-// a caster, so there is no second estimator). Zero when no valid chain is found.
+struct MneeResult {
+  contribution: vec3<f32>,
+  // 100 when a chain was solved, else the number of the check that rejected the sample.
+  reason: u32,
+}
+
+fn mnee_failed(reason: u32) -> MneeResult {
+  var failed: MneeResult;
+  failed.contribution = vec3<f32>(0.0);
+  failed.reason = reason;
+  return failed;
+}
+
+// [DEBUG-mnee] reasons shown in the red, green and blue channels, 0 for a normal render.
+const MNEE_DEBUG_R: u32 = 0u;
+const MNEE_DEBUG_G: u32 = 0u;
+const MNEE_DEBUG_B: u32 = 0u;
+
 fn mnee_direct_contribution(
   sample: LgtDirectSample,
   closure: ptr<function, Closure>,
@@ -339,7 +354,29 @@ fn mnee_direct_contribution(
   throughput: vec3<f32>,
   transparent_bounces: u32,
 ) -> vec3<f32> {
-  let none = vec3<f32>(0.0);
+  let solved = mnee_direct_solve(sample, closure, point, wo, throughput, transparent_bounces);
+  if (MNEE_DEBUG_R != 0u || MNEE_DEBUG_G != 0u || MNEE_DEBUG_B != 0u) {
+    // reason 999 counts every call
+    return vec3<f32>(
+      select(0.0, 1.0, MNEE_DEBUG_R == 999u || solved.reason == MNEE_DEBUG_R),
+      select(0.0, 1.0, MNEE_DEBUG_G == 999u || solved.reason == MNEE_DEBUG_G),
+      select(0.0, 1.0, MNEE_DEBUG_B == 999u || solved.reason == MNEE_DEBUG_B),
+    );
+  }
+  return solved.contribution;
+}
+
+// The light a direct sample brings to the vertex through the glass that blocks the straight shadow ray, with the BSDF, the
+// throughput and the Fresnel and absorption losses applied and no MIS weight (the integrator drops the BSDF-found light through
+// a caster, so there is no second estimator). Zero when no valid chain is found.
+fn mnee_direct_solve(
+  sample: LgtDirectSample,
+  closure: ptr<function, Closure>,
+  point: ptr<function, ShadingPoint>,
+  wo: vec3<f32>,
+  throughput: vec3<f32>,
+  transparent_bounces: u32,
+) -> MneeResult {
   let receiver = (*point).position;
   let is_far = sample.distance >= 1.0e29;
   let light_distance = select(sample.distance, MNEE_FAR_DISTANCE, is_far);
@@ -353,7 +390,7 @@ fn mnee_direct_contribution(
   );
   var vertex_a = mnee_vertex_from_hit(first_hit);
   if (vertex_a.valid == 0u || dot(sample.wi, vertex_a.normal) >= 0.0) {
-    return none;
+    return mnee_failed(1u);
   }
   let second_hit = int_trace_closest_surface(
     vertex_a.position, sample.wi, 0.0, light_distance, INSTANCE_VISIBILITY_SHADOW,
@@ -361,7 +398,7 @@ fn mnee_direct_contribution(
   );
   var vertex_b = mnee_vertex_from_hit(second_hit);
   if (vertex_b.valid == 0u || dot(sample.wi, vertex_b.normal) <= 0.0) {
-    return none;
+    return mnee_failed(2u);
   }
 
   var chain: MneeChain;
@@ -386,7 +423,7 @@ fn mnee_direct_contribution(
     residual_size = length(residual);
     var jacobian: array<f32, 16>;
     if (!mnee_jacobian(chain, vertex_a, vertex_b, residual, derivative_step, &jacobian)) {
-      return none;
+      return mnee_failed(3u);
     }
     var newton_step: array<f32, 8>;
     for (var row = 0u; row < 4u; row += 1u) {
@@ -394,7 +431,7 @@ fn mnee_direct_contribution(
       newton_step[row * 2u + 1u] = 0.0;
     }
     if (!mnee_solve(&jacobian, &newton_step, 1u)) {
-      return none;
+      return mnee_failed(4u);
     }
     var move_a = chain.frame_a[0] * newton_step[0] + chain.frame_a[1] * newton_step[2];
     var move_b = chain.frame_b[0] * newton_step[4] + chain.frame_b[1] * newton_step[6];
@@ -428,12 +465,12 @@ fn mnee_direct_contribution(
       damping *= 0.5;
     }
     if (!accepted) {
-      return none;
+      return mnee_failed(5u);
     }
     converged = residual_size <= MNEE_CONVERGED_RESIDUAL;
   }
   if (!converged) {
-    return none;
+    return mnee_failed(6u);
   }
 
   // The solution must still enter at a and leave at b, with a ray refracting at each (opposite sides of the surface).
@@ -445,7 +482,7 @@ fn mnee_direct_contribution(
   let cos_in_b = dot(a_to_b, vertex_b.normal);
   let cos_out_b = dot(toward_target, vertex_b.normal);
   if (cos_in_a <= 1.0e-4 || cos_out_a <= 1.0e-4 || cos_in_b <= 1.0e-4 || cos_out_b <= 1.0e-4) {
-    return none;
+    return mnee_failed(7u);
   }
 
   // Jacobian at the solution and the derivative of the surface coordinates of a with the position of the light.
@@ -454,7 +491,7 @@ fn mnee_direct_contribution(
   residual = mnee_residual(chain, vertex_a, vertex_b);
   var final_jacobian: array<f32, 16>;
   if (!mnee_jacobian(chain, vertex_a, vertex_b, residual, derivative_step, &final_jacobian)) {
-    return none;
+    return mnee_failed(8u);
   }
   var light_axis_x = vec3<f32>(0.0);
   var light_axis_y = vec3<f32>(0.0);
@@ -477,11 +514,11 @@ fn mnee_direct_contribution(
   }
   // The solve returns -da/dy times the right-hand side's sign: only the determinant of its first two rows is used.
   if (!mnee_solve(&final_jacobian, &light_derivative, 2u)) {
-    return none;
+    return mnee_failed(9u);
   }
   let surface_per_light_area = abs(light_derivative[0] * light_derivative[3] - light_derivative[1] * light_derivative[2]);
   if (!(surface_per_light_area > 0.0)) {
-    return none;
+    return mnee_failed(10u);
   }
 
   // The path must be free: receiver to a, inside the glass from a to b, and from b to the light.
@@ -489,10 +526,10 @@ fn mnee_direct_contribution(
   let distance_to_a = length(vertex_a.position - receiver);
   let origin_to_a = int_ray_offset_origin(point, direction_to_a);
   if (!mnee_segment_reaches(origin_to_a, vertex_a.position, (*point).instance_index, (*point).triangle_index, vertex_a.instance_index)) {
-    return none;
+    return mnee_failed(11u);
   }
   if (!mnee_segment_reaches(vertex_a.position, vertex_b.position, vertex_a.instance_index, vertex_a.triangle_index, vertex_b.instance_index)) {
-    return none;
+    return mnee_failed(12u);
   }
   let light_leg = target_point - vertex_b.position;
   let light_leg_length = select(length(light_leg), sample.distance, is_far);
@@ -502,12 +539,12 @@ fn mnee_direct_contribution(
     sample.target_instance, sample.target_triangle, transparent_bounces,
   );
   if (!any(leg_visibility > vec3<f32>(0.0))) {
-    return none;
+    return mnee_failed(13u);
   }
 
   let bsdf = closure_eval(closure, direction_to_a, wo);
   if (bsdf.value.x <= 0.0 && bsdf.value.y <= 0.0 && bsdf.value.z <= 0.0) {
-    return none;
+    return mnee_failed(14u);
   }
   let material_a = materials[vertex_a.material_index];
   let material_b = materials[vertex_b.material_index];
@@ -521,5 +558,8 @@ fn mnee_direct_contribution(
   let cos_receiver_side = abs(dot(direction_to_a, vertex_a.normal));
   let measure_factor = light_distance * light_distance * cos_receiver_side * surface_per_light_area
     / max(distance_to_a * distance_to_a, 1.0e-12);
-  return throughput * bsdf.value * sample.radiance * transmittance * leg_visibility * (measure_factor / sample.pdf);
+  var solved: MneeResult;
+  solved.contribution = throughput * bsdf.value * sample.radiance * transmittance * leg_visibility * (measure_factor / sample.pdf);
+  solved.reason = 100u;
+  return solved;
 }

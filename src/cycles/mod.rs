@@ -583,6 +583,12 @@ pub(crate) fn specialize_kernel_source(source: &str, scene: &SceneSpecialization
     specialize!(F82, has_f82);
     specialize!(NORMAL_MAP, has_normal_map);
     specialize!(CASTERS, has_casters);
+    // [DEBUG-mnee] temporary: COOK_MNEE_DEBUG="r,g,b" shows the rejection reasons of the caustic solver.
+    if let Ok(debug) = std::env::var("COOK_MNEE_DEBUG") {
+        for (channel, value) in ["R", "G", "B"].iter().zip(debug.split(',')) {
+            result = result.replace(&format!("const MNEE_DEBUG_{channel}: u32 = 0u;"), &format!("const MNEE_DEBUG_{channel}: u32 = {value}u;"));
+        }
+    }
     specialize!(TEXTURE_MIPS, (kernel_flags & KERNEL_FLAG_TEXTURE_MIPS) != 0);
     // Unlike the other sentinels this one defaults to `false`, so a kernel compiled without specialization reads no extension records.
     if has_diffuse_transmission {
