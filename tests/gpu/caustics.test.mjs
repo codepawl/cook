@@ -58,5 +58,5 @@ test('a raised glass ball throws a caustic spot on the floor once it is a caster
   const without = brightestBlock(render(buildCausticInput('ball', scene)));
   const withCaustics = brightestBlock(render(buildCausticInput('ball', { ...scene, caustics: true })));
   assert.ok(Number.isFinite(withCaustics));
-  assert.ok(withCaustics > without * 1.5, );
+  assert.ok(withCaustics > without * 1.5, 'brightest block: ' + withCaustics + ' with the estimator, ' + without + ' without');
 });
