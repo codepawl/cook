@@ -374,3 +374,66 @@ fn bsdf_glass_sample(
   let eval_val = (*lobe).weight * spec_weight * (energy_scale * common_factor / (1.0 + lambda_wo + lambda_wi));
   return BsdfMfSample(wi, pdf, eval_val, false);
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Spectral dispersion (codepawl/crucible#1714).
+//
+// A path of a scene with a dispersive material (`SCENE_HAS_DISPERSION`) carries one hero wavelength, drawn uniformly over
+// 400 to 700 nm. The refraction index of a dispersive glass follows Cauchy's equation `n(l) = A + B / l^2`, fitted so that
+// the index at the d line is the material `ior` and the Abbe number is `20 / dispersion` (the OpenPBR scale of Blender 5.3's
+// Principled BSDF `Dispersion` and of glTF `KHR_materials_dispersion`). The path takes the colour of its wavelength at the
+// first vertex whose material is dispersive: the throughput is multiplied by `spectral_rgb_weight`, whose mean over the
+// wavelengths is (1, 1, 1), so a beam that is not split keeps its colour and a split beam fans out into a continuous spectrum.
+// ---------------------------------------------------------------------------------------------------------------------
+const SPECTRAL_WAVELENGTH_MIN_UM: f32 = 0.4;
+const SPECTRAL_WAVELENGTH_RANGE_UM: f32 = 0.3;
+const SPECTRAL_D_LINE_UM: f32 = 0.5876;
+const SPECTRAL_F_LINE_UM: f32 = 0.4861;
+const SPECTRAL_C_LINE_UM: f32 = 0.6563;
+// The Abbe number of a material whose `dispersion` is 1 (the OpenPBR default).
+const SPECTRAL_ABBE_AT_UNIT_DISPERSION: f32 = 20.0;
+// Mean of the clamped linear sRGB response over 400 to 700 nm, so that the weight averages to one per channel.
+const SPECTRAL_RGB_MEAN: vec3<f32> = vec3<f32>(0.58696402, 0.38445508, 0.36257666);
+
+fn spectral_wavelength_um(unit: f32) -> f32 {
+  return SPECTRAL_WAVELENGTH_MIN_UM + SPECTRAL_WAVELENGTH_RANGE_UM * unit;
+}
+
+fn spectral_asymmetric_gaussian(wavelength_nm: f32, center: f32, sigma_below: f32, sigma_above: f32) -> f32 {
+  let sigma = select(sigma_above, sigma_below, wavelength_nm < center);
+  let offset = (wavelength_nm - center) / sigma;
+  return exp(-0.5 * offset * offset);
+}
+
+// Wyman, Sloan and Shirley (2013) multi-lobe fit of the CIE 1931 observer, as linear sRGB clamped at zero and divided by its
+// mean over the sampled wavelengths.
+fn spectral_rgb_weight(wavelength_um: f32) -> vec3<f32> {
+  let nm = wavelength_um * 1000.0;
+  let x_bar = 1.056 * spectral_asymmetric_gaussian(nm, 599.8, 37.9, 31.0)
+    + 0.362 * spectral_asymmetric_gaussian(nm, 442.0, 16.0, 26.7)
+    - 0.065 * spectral_asymmetric_gaussian(nm, 501.1, 20.4, 26.2);
+  let y_bar = 0.821 * spectral_asymmetric_gaussian(nm, 568.8, 46.9, 40.5)
+    + 0.286 * spectral_asymmetric_gaussian(nm, 530.9, 16.3, 31.1);
+  let z_bar = 1.217 * spectral_asymmetric_gaussian(nm, 437.0, 11.8, 36.0)
+    + 0.681 * spectral_asymmetric_gaussian(nm, 459.0, 26.0, 13.8);
+  let linear_rgb = vec3<f32>(
+    3.2406 * x_bar - 1.5372 * y_bar - 0.4986 * z_bar,
+    -0.9689 * x_bar + 1.8758 * y_bar + 0.0415 * z_bar,
+    0.0557 * x_bar - 0.2040 * y_bar + 1.0570 * z_bar,
+  );
+  return max(linear_rgb, vec3<f32>(0.0)) / SPECTRAL_RGB_MEAN;
+}
+
+// The refraction index at `wavelength_um` of a glass whose index at the d line is `ior`. Zero dispersion, or an index of one
+// or less, returns `ior` unchanged.
+fn bsdf_glass_dispersive_ior(ior: f32, dispersion: f32, wavelength_um: f32) -> f32 {
+  if (dispersion <= 0.0 || ior <= 1.0) {
+    return ior;
+  }
+  let inverse_square_f = 1.0 / (SPECTRAL_F_LINE_UM * SPECTRAL_F_LINE_UM);
+  let inverse_square_c = 1.0 / (SPECTRAL_C_LINE_UM * SPECTRAL_C_LINE_UM);
+  let index_spread = (ior - 1.0) * dispersion / SPECTRAL_ABBE_AT_UNIT_DISPERSION;
+  let cauchy_b = index_spread / (inverse_square_f - inverse_square_c);
+  let cauchy_a = ior - cauchy_b / (SPECTRAL_D_LINE_UM * SPECTRAL_D_LINE_UM);
+  return max(cauchy_a + cauchy_b / (wavelength_um * wavelength_um), 1.0);
+}

@@ -5,7 +5,7 @@
 // part looks the same whether or not other geometry in the scene is shared. The maps go from the materials into the FORMAT-v2
 // texture pool without the v1 atlas, so the pool (1 GiB) is the limit on them, not the atlas (4096 x 16384 texels).
 import { buildNativeV1Tables, packNativeMaterialTables, withVirtualAtlas } from './pack-input.mjs';
-import { buildNativeInputV2, reduceV1MaterialTable, upgradeNativeInputV1ToV2, validateDiffuseTransmission } from './pack-input-v2.mjs';
+import { buildNativeInputV2, reduceV1MaterialTable, upgradeNativeInputV1ToV2, validateDiffuseTransmission, validateDispersion } from './pack-input-v2.mjs';
 
 const ALL_LIGHT_GROUPS = 0xffffffff;
 
@@ -62,8 +62,14 @@ function diffuseTransmissionFields(material) {
   return fields;
 }
 
+// Dispersion (glTF KHR_materials_dispersion, Blender's Principled Dispersion): 20 divided by the Abbe number, 0 for none.
+function dispersionFields(material) {
+  validateDispersion(material);
+  return material.dispersion > 0 ? { dispersion: material.dispersion } : {};
+}
+
 function layerFields(material, resolved) {
-  const fields = { ...diffuseTransmissionFields(material) };
+  const fields = { ...diffuseTransmissionFields(material), ...dispersionFields(material) };
   if (material.specular !== undefined) fields.specular = material.specular;
   if (material.specularColor !== undefined && !isWhite(material.specularColor)) fields.specularColor = material.specularColor;
   if (material.anisotropy > 0) Object.assign(fields, cyclesAnisotropyFields(material, resolved.roughness));
