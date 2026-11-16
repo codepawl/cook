@@ -9,3 +9,4 @@ pub(crate) mod cycles_session;
 pub(crate) mod session;
 pub(crate) mod textures;
 pub(crate) mod cycles_update;
+pub(crate) mod post;

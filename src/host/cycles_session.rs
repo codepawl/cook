@@ -20,6 +20,7 @@ use crate::host::accel::{
 use crate::host::cycles_update::{choose_film_use, plan_instance_update, FilmRequest, ProgressiveFilm, UpdatableTable};
 use crate::host::capacity::TEXEL_BYTES;
 use crate::host::device::{check_buffer_sizes_fit, failure, run_in_error_scopes, storage_buffer};
+use crate::host::post::PostPipelines;
 use crate::host::film::{image_accumulation_bytes, image_workgroups, read_accumulation};
 use crate::host::session::{
     create_cycles_bind_group, get_cycles_device_context, get_or_compile_cycles_pipeline_on, pipeline_key,
@@ -232,6 +233,8 @@ impl RetainedTables {
 
 pub(crate) struct CyclesSession {
     context: CyclesDeviceContext,
+    /// The post stage's compiled passes, made by the first frame that asks for a `post`.
+    post_pipelines: std::sync::OnceLock<PostPipelines>,
     /// The kernel parameters the session was created with (or last updated to), the default for a frame that brings none.
     session_kernel_params: Vec<u8>,
     scene_specialization: SceneSpecialization,
@@ -375,6 +378,7 @@ impl CyclesSession {
 
         Ok(CyclesSession {
             context,
+            post_pipelines: std::sync::OnceLock::new(),
             session_kernel_params: input.kernel_params.to_vec(),
             scene_specialization,
             retained: RetainedTables::of_input(input),
@@ -397,6 +401,15 @@ impl CyclesSession {
 
     pub(crate) fn device_context(&self) -> &CyclesDeviceContext {
         &self.context
+    }
+
+    /// The compiled post passes, compiled on first use and kept until the session is dropped.
+    pub(crate) fn post_pipelines(&self) -> Result<&PostPipelines> {
+        if let Some(compiled) = self.post_pipelines.get() {
+            return Ok(compiled);
+        }
+        let compiled = PostPipelines::compile(&self.context.device)?;
+        Ok(self.post_pipelines.get_or_init(|| compiled))
     }
 
     /// Frees the scene, the acceleration structures, the pipeline and the film. A closed session refuses to render.
