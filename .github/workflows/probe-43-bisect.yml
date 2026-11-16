@@ -1,0 +1,65 @@
+name: probe-43-bisect
+on:
+  push:
+    branches: [probe-43-warp]
+  workflow_dispatch:
+jobs:
+  bisect:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [base, sample-off-pdf-off, sample-off, pdf-off, one-level, child-importance-const, emitter-importance-const, left-probability-const, leaf-first-slot]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: rustup toolchain install stable --profile minimal --target x86_64-pc-windows-msvc
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-warp-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - name: Apply the variant
+        run: node tools/patch-43.mjs ${{ matrix.variant }}
+      - name: Build with dx12
+        run: |
+          start=$(date +%s)
+          node build.mjs
+          echo "BUILD_SECONDS warp $(( $(date +%s) - start ))"
+      - name: Fetch WARP and DXC from NuGet
+        run: |
+          mkdir -p ../nuget-warp ../nuget-dxc
+          latest_stable() {
+            curl -s "https://api.nuget.org/v3-flatcontainer/$1/index.json" | node -e "const v=JSON.parse(require('fs').readFileSync(0,'utf8')).versions.filter(x=>!x.includes('-'));console.log(v[v.length-1])"
+          }
+          warp_version=$(latest_stable microsoft.direct3d.warp)
+          dxc_version=$(latest_stable microsoft.direct3d.dxc)
+          echo "WARP package $warp_version, DXC package $dxc_version"
+          curl -sL -o ../nuget-warp/warp.zip "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.warp/$warp_version/microsoft.direct3d.warp.$warp_version.nupkg"
+          curl -sL -o ../nuget-dxc/dxc.zip "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.dxc/$dxc_version/microsoft.direct3d.dxc.$dxc_version.nupkg"
+          (cd ../nuget-warp && unzip -q warp.zip && find . -iname 'd3d10warp.dll')
+          (cd ../nuget-dxc && unzip -q dxc.zip && find . -iname 'dxcompiler.dll' -o -iname 'dxil.dll')
+          node_directory=$(dirname "$(which node)")
+          cp ../nuget-warp/build/native/bin/x64/d3d10warp.dll "$node_directory/"
+          cp ../nuget-dxc/build/native/bin/x64/dxcompiler.dll ../nuget-dxc/build/native/bin/x64/dxil.dll "$node_directory/"
+          ls -la "$node_directory" | grep -i -E "warp|dxc|dxil"
+          powershell -Command "(Get-Item '$node_directory/d3d10warp.dll').VersionInfo | Format-List FileVersion, ProductVersion"
+      - name: Trace the tree variant
+        env:
+          COOK_WGPU_BACKEND: dx12
+        run: |
+          for size in "16 8 4" "48 32 32"; do
+            set -- $size
+            echo "--- ${{ matrix.variant }} $1x$2 samples $3"
+            PROBE_ONLY=tree PROBE_WIDTH=$1 PROBE_HEIGHT=$2 PROBE_SAMPLES=$3 timeout 300 node tools/probe-warp-43.mjs "${{ matrix.variant }}" 2>&1 | cut -c1-300
+            echo "EXIT ${{ matrix.variant }} $1x$2 status ${PIPESTATUS[0]}"
+          done

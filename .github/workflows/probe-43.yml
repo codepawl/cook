@@ -1,7 +1,7 @@
 name: probe-43
 on:
   push:
-    branches: [probe-43-warp]
+    branches: [probe-43-warp-disabled]
 jobs:
   warp:
     runs-on: windows-latest
