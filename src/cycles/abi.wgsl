@@ -132,6 +132,9 @@ const SCENE_HAS_F82: bool = true;
 // The material table holds an extension record per material after its `material_count` records (FORMAT-v2.md). Unlike the
 // flags above, `false` is the safe default: only the host's specialization turns it on, for a table that carries them.
 const SCENE_HAS_DIFFUSE_TRANSMISSION: bool = false;
+// Some material has a `dispersion` in its extension record (FORMAT-v2.md), so each path carries a hero wavelength. `false` is
+// the safe default for the same reason, and the kernel is then the one without dispersion, bit for bit.
+const SCENE_HAS_DISPERSION: bool = false;
 const SCENE_HAS_NORMAL_MAP: bool = true;
 // False when the frame leaves KERNEL_FLAG_TEXTURE_MIPS off: the ray cone and the trilinear lookup then compile out. Left in
 // as run-time branches they cost a fogged, textured scene about five times the sampling time though it never used them.
@@ -616,7 +619,7 @@ struct ClosureSample {
 //
 // Exact WGSL signatures to be defined by Lane L4 (`src/cycles/closure.wgsl`):
 //
-//   fn closure_build(point: ptr<function, ShadingPoint>, wo: vec3<f32>) -> Closure
+//   fn closure_build(point: ptr<function, ShadingPoint>, wo: vec3<f32>, wavelength_um: f32) -> Closure
 //   fn closure_eval(closure: ptr<function, Closure>, wi: vec3<f32>, wo: vec3<f32>) -> ClosureEval
 //   fn closure_sample(closure: ptr<function, Closure>, wo: vec3<f32>, u: vec3<f32>) -> ClosureSample
 // ---------------------------------------------------------------------------------------------------------------------
