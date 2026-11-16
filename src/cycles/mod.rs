@@ -839,6 +839,8 @@ const SCENE_HAS_DIFFUSE_TRANSMISSION: bool = false;";
         glass_ior = bsdf_glass_dispersive_ior("), "the index follows the wavelength only when on");
         assert!(kernel.contains("if (SCENE_HAS_DISPERSION && arrayLength(&materials) >= 2u * kernel_params.material_count) {"));
         assert!(kernel.contains("fn closure_build(point: ptr<function, ShadingPoint>, wo: vec3<f32>, wavelength_um: f32)"));
+        // A negative channel survives the sanitising of a sample only for a dispersive scene: the spectral weight has negative lobes.
+        assert!(kernel.contains("let valid_x = (value.x >= 0.0 || SCENE_HAS_DISPERSION) && abs(value.x) < 1.0e30;"));
     }
 
     #[test]
