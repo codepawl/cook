@@ -1227,11 +1227,13 @@ fn ").unwrap_or(sample_body.len());
     #[test]
     fn a_normal_mapped_lobe_is_zeroed_below_the_smooth_surface_by_the_bump_shadowing_term() {
         let kernel = assemble_cycles_kernel().expect("the kernel assembles");
-        let function_start = kernel.find("fn closure_passes_bump_shadowing(").expect("the bump shadowing term exists");
+        let function_start = kernel.find("fn closure_bump_shadowing_weight(").expect("the bump shadowing term exists");
         let function_body = &kernel[function_start..];
-        assert!(function_body.contains("if (all(lobe_normal == smooth_normal)) {\n    return true;"), "an unmapped lobe is never affected");
-        assert!(function_body.contains("dot(smooth_normal, wi) * dot(smooth_normal, lobe_normal) * dot(lobe_normal, wi)"));
-        assert!(function_body.contains("return product >= 0.0;"));
+        assert!(function_body.contains("if (all(lobe_normal == smooth_normal)) {\n    return 1.0;"), "an unmapped lobe is never affected");
+        assert!(function_body.contains("cos_smooth_wi * cos_smooth_lobe * dot(lobe_normal, wi)"));
+        assert!(function_body.contains("if (product < 0.0) {\n    return 0.0;"));
+        assert!(function_body.contains("let bump_alpha2 = clamp(0.125 * tan2_deviation, 0.0, 1.0);"), "a diffuse lobe is softened as Cycles does");
+        assert!(function_body.contains("return bsdf_mf_g1(bump_alpha2, cos_incoming);"));
 
         let build_start = kernel.find("fn closure_build(").expect("the closure builder exists");
         assert!(kernel[build_start..].contains("closure.smooth_normal = bsdf_mf_safe_normalize_fallback((*point).shading_normal, (*point).geometric_normal);"));
@@ -1239,8 +1241,10 @@ fn ").unwrap_or(sample_body.len());
         let eval_start = kernel.find("fn closure_eval(").expect("the closure evaluation exists");
         let eval_body = &kernel[eval_start..];
         let gate = eval_body
-            .find("if (SCENE_HAS_NORMAL_MAP && !closure_passes_bump_shadowing(lobe_copy.normal, (*closure).smooth_normal, wi)) {")
+            .find("bump_shadowing = closure_bump_shadowing_weight(lobe_copy.lobe_type, lobe_copy.normal, (*closure).smooth_normal, wi);")
             .expect("the term is gated by the normal map constant");
+        assert!(eval_body.contains("if (SCENE_HAS_NORMAL_MAP) {\n      bump_shadowing"));
+        assert!(eval_body.contains("total_value = total_value + ev.value * bump_shadowing;"), "the value is scaled and the pdf is not");
         let lobe_eval = eval_body.find("closure_eval_single_lobe(&lobe_copy, wi, wo)").expect("the lobe is evaluated");
         assert!(gate < lobe_eval, "the lobe is skipped before it is evaluated");
     }
