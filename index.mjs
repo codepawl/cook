@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { requireReadablePackRevision, withTimeLimitCode } from './engine.mjs';
+import { resolvePostOption } from './post-options.mjs';
 
 import {
   FORMAT_V2_MAGIC,
@@ -548,7 +549,8 @@ export function resolveSessionFrame(sessionInput, sessionOptions, renderOptions)
   const { width, height, samples, samplesPerDispatch, dispatchBudgetMs, maxSeconds, bootstrapKernel, denoise, accumulate, targetSamples } = options;
   requireHeldCameraMatchesImageSize(kernelParams, width, height, 'NativeSession.render');
   validateProgressiveOptions({ accumulate, targetSamples, samples });
-  return { width, height, samples, samplesPerDispatch, dispatchBudgetMs, maxSeconds, bootstrapKernel, denoise, kernelParams, accumulate, targetSamples };
+  const post = resolvePostOption(options.post, 'NativeSession.render');
+  return { width, height, samples, samplesPerDispatch, dispatchBudgetMs, maxSeconds, bootstrapKernel, denoise, kernelParams, accumulate, targetSamples, post };
 }
 
 const MAX_TARGET_SAMPLES = 16777216;
@@ -678,7 +680,8 @@ export function wrapNativeSession(nativeSession, sessionInput, sessionOptions) {
       }
       const denoise = resolveOptions.denoise ?? sessionOptions.denoise;
       validateDenoiseOption(denoise, 'NativeSession.resolve');
-      const { trace, session } = nativeSession.resolve({ denoise });
+      const post = resolvePostOption(resolveOptions.post ?? sessionOptions.post, 'NativeSession.resolve');
+      const { trace, session } = nativeSession.resolve({ denoise, post });
       return { ...trace, ...session };
     },
     update(newInput) {
@@ -714,8 +717,14 @@ export function wrapNativeSession(nativeSession, sessionInput, sessionOptions) {
  * one, so an image can grow over several calls (the first call of an image sets `targetSamples`, the total it will hold; later
  * calls leave it out). The calls continue one sample sequence, so the film after all of them equals one render of `targetSamples`
  * samples byte for byte. The reports carry `firstSample`, `filmSamples` and `targetSamples`. `reset()` starts the image over.
- * `resolve({ denoise })` returns the film as it stands without tracing. A later call must keep the size and the render settings
+ * `resolve({ denoise, post })` returns the film as it stands without tracing. A later call must keep the size and the render settings
  * (camera, seed, sampler) of the first; a plain frame (no `accumulate`) discards the progressive image.
+ *
+ * Post stage: `render({ post })` and `resolve({ post })` also return `display`, a Uint8Array of 8-bit sRGB RGBA (width * height * 4, row by
+ * row from the top) made on the GPU from the film after the denoise, with `postSeconds`. `post` is { exposure, viewTransform: 'agx' |
+ * 'aces' | 'neutral' | 'standard', whiteBalance, lift, gamma, gain, bloom: { strength, radius, threshold }, grain: { amount, seed },
+ * vignette: { strength } }, every field optional and bounded; docs/post-stage.md has the ranges, the order and the tolerance against
+ * Crucible's JavaScript. Without `post` the result is unchanged.
  *
  * `update(newInput)` takes a FORMAT-v2 input packed from the same scene with other material values, lights, emission or instance
  * transforms and applies it without a new pipeline or BLAS build (the TLAS is rebuilt when a transform changed). It returns

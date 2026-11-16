@@ -13,6 +13,7 @@ use napi_derive::napi;
 
 use crate::host::denoise::{atrous_denoise, DenoiseInput, DeviceHealth};
 use crate::host::device::failure;
+use crate::host::post::{apply_post, PostSettings};
 use crate::host::film::{
     image_accumulation_bytes, image_workgroups, pad_texel_vectors, resolve_image, resolve_texels,
     texel_accumulation_bytes, texel_workgroups,
@@ -194,6 +195,52 @@ pub struct NativeCyclesTraceOptions {
     pub accumulate: Option<bool>,
     /// Session only: the sample count of the whole image a progressive film builds; the first accumulating call sets it.
     pub target_samples: Option<u32>,
+    /// Session only: the post stage that also turns the film into 8-bit display RGBA (`display` of the result).
+    pub post: Option<NativePostOptions>,
+}
+
+/// The post stage of a session render or resolve. `index.mjs` validates the public options and fills every field, so the
+/// addon receives one complete look.
+#[napi(object)]
+pub struct NativePostOptions {
+    pub exposure: f64,
+    /// `"standard"`, `"aces"`, `"agx"` or `"neutral"`.
+    pub view_transform: String,
+    pub white_balance: f64,
+    /// Red, green and blue.
+    pub lift: Vec<f64>,
+    pub gamma: Vec<f64>,
+    pub gain: Vec<f64>,
+    pub bloom_strength: f64,
+    pub bloom_radius: f64,
+    pub bloom_threshold: f64,
+    pub grain_amount: f64,
+    pub grain_seed: u32,
+    pub vignette_strength: f64,
+}
+
+fn three_floats(values: &[f64], field: &str) -> Result<[f32; 3]> {
+    if values.len() != 3 {
+        return Err(failure(format!("Post {field} needs three numbers (red, green, blue), got {}.", values.len())));
+    }
+    Ok([values[0] as f32, values[1] as f32, values[2] as f32])
+}
+
+fn post_settings(options: &NativePostOptions) -> Result<PostSettings> {
+    Ok(PostSettings {
+        exposure: options.exposure as f32,
+        view_transform: options.view_transform.clone(),
+        white_balance: options.white_balance as f32,
+        lift: three_floats(&options.lift, "lift")?,
+        gamma: three_floats(&options.gamma, "gamma")?,
+        gain: three_floats(&options.gain, "gain")?,
+        bloom_strength: options.bloom_strength as f32,
+        bloom_radius: options.bloom_radius as f32,
+        bloom_threshold: options.bloom_threshold as f32,
+        grain_amount: options.grain_amount as f32,
+        grain_seed: options.grain_seed,
+        vignette_strength: options.vignette_strength as f32,
+    })
 }
 
 #[napi(object)]
@@ -268,6 +315,10 @@ pub struct NativeTraceResult {
     pub rgba: Float32Array,
     /// The `rgba` image after the a-trous filter (biased: smoothed, not converged); present only when `denoise` was `"atrous"`.
     pub denoised_rgba: Option<Float32Array>,
+    /// With a `post` option: 8-bit sRGB RGBA, four bytes per pixel, made from `denoisedRgba` when present, else from `rgba`.
+    pub display: Option<Uint8Array>,
+    /// What the post stage took in seconds, excluding its pipeline compile: upload, the dispatches, readback of the 8-bit image.
+    pub post_seconds: Option<f64>,
     /// What the filter took in seconds, excluding its one-time pipeline compile: upload, the seven dispatches, readback.
     pub denoise_seconds: Option<f64>,
     /// Only the seven dispatches, from submit until the device finished them.
@@ -353,6 +404,8 @@ pub fn trace_scene(input: NativeTraceInput, options: NativeTraceOptions) -> Resu
         Ok(NativeTraceResult {
             rgba: Float32Array::new(resolved.rgba),
             denoised_rgba: None,
+            display: None,
+            post_seconds: None,
             denoise_seconds: None,
             denoise_gpu_seconds: None,
             denoise_compile_seconds: None,
@@ -407,6 +460,8 @@ pub struct NativeSessionRenderResult {
 pub struct NativeSessionResolveOptions {
     /// `"none"` (default) or `"atrous"`, as for a render.
     pub denoise: Option<String>,
+    /// The post stage, as for a render.
+    pub post: Option<NativePostOptions>,
 }
 
 /// The tables of a session update that changed, and the kernel parameters of the new input.
@@ -456,7 +511,7 @@ fn render_session_frame(
         target_samples: options.target_samples,
     };
     let render = session.render(&request)?;
-    session_render_result(session, options.width, options.height, use_atrous_filter, render)
+    session_render_result(session, options.width, options.height, use_atrous_filter, options.post.as_ref(), render)
 }
 
 /// Resolves the sums of a session render (or of the film as it stands) into the result object.
@@ -465,6 +520,7 @@ fn session_render_result(
     width: u32,
     height: u32,
     use_atrous_filter: bool,
+    post: Option<&NativePostOptions>,
     render: CyclesRender,
 ) -> Result<NativeSessionRenderResult> {
     let pixel_count = width as u64 * height as u64;
@@ -492,12 +548,35 @@ fn session_render_result(
     } else {
         None
     };
+    let post_output = match post {
+        Some(post_options) => {
+            let film_rgba = filtered.as_ref().map_or(resolved.rgba.as_slice(), |output| output.rgba.as_slice());
+            Some(apply_post(
+                &context.device,
+                &context.queue,
+                session.post_pipelines()?,
+                film_rgba,
+                width,
+                height,
+                &post_settings(post_options)?,
+                &DeviceHealth {
+                    device_lost: &context.device_lost,
+                    device_error: &context.device_error,
+                    uncaptured_error: &context.uncaptured_error,
+                },
+            )?)
+        }
+        None => None,
+    };
+    let post_seconds = post_output.as_ref().map(|output| output.seconds);
     let denoise_seconds = filtered.as_ref().map(|output| output.upload_seconds + output.gpu_seconds + output.readback_seconds);
     let denoise_gpu_seconds = filtered.as_ref().map(|output| output.gpu_seconds);
     let denoise_compile_seconds = filtered.as_ref().map(|output| output.compile_seconds);
     let trace = NativeTraceResult {
         rgba: Float32Array::new(resolved.rgba),
         denoised_rgba: filtered.map(|output| Float32Array::new(output.rgba)),
+        display: post_output.map(|output| Uint8Array::new(output.display)),
+        post_seconds,
         denoise_seconds,
         denoise_gpu_seconds,
         denoise_compile_seconds,
@@ -558,7 +637,7 @@ fn resolve_session_film(session: &mut CyclesSession, options: &NativeSessionReso
             target_samples: film.target_samples,
         },
     };
-    session_render_result(session, film.width, film.height, use_atrous_filter, render)
+    session_render_result(session, film.width, film.height, use_atrous_filter, options.post.as_ref(), render)
 }
 
 fn update_tables<'a>(options: &'a NativeSessionUpdateOptions) -> Vec<(UpdatableTable, &'a [u8])> {

@@ -325,6 +325,10 @@ session.reset();                                                                
 
 A call must keep the image size and every render setting of the call that began the image (camera, seed, sampler, bounces and the rest of `kernelParams`); one that does not is refused with the way out (`reset()`, or a plain frame), and so is one that asks for more samples than `targetSamples` leaves. A refused call leaves the film as it was. A call that fails while drawing (a `maxSeconds` limit, a lost device) ends the image, since the film then holds an unknown number of samples: `resolve()` throws, and the next accumulating call starts a new image and needs `targetSamples` again. `maxSeconds` counts the seconds of one call.
 
+### Post stage
+
+`render({ post })` and `resolve({ post })` also return `display`: 8-bit sRGB RGBA (`width * height * 4`, rows from the top) made on the GPU from the film after the denoise, with exposure, AgX, ACES or neutral view transform, white balance, lift/gamma/gain, bloom, seeded grain and vignette, and `postSeconds`. Without `post` nothing changes. Options, order and the 2/255 tolerance against the JavaScript reference: [docs/post-stage.md](docs/post-stage.md).
+
 ### Updating the scene
 
 `session.update(newInput)` takes a FORMAT-v2 input packed from the same scene after a change of values and applies it to the card without compiling a pipeline or building a BLAS:
