@@ -1001,6 +1001,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var ray_cone = vec2<f32>(0.0);
 
   var throughput = vec3<f32>(1.0);
+  // The hero wavelength of the path in micrometres (drawn only when the scene has dispersion) and whether its colour is in the
+  // throughput yet. Without dispersion the constant is the d line and nothing reads it.
+  var path_wavelength_um = SPECTRAL_D_LINE_UM;
+  var path_has_spectral_weight = false;
   var medium_sigma = vec3<f32>(0.0);
   var in_medium = false;
   var medium_stack_instances: array<u32, 4>;
@@ -1066,6 +1070,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       }
 
       throughput = vec3<f32>(1.0);
+      if (SCENE_HAS_DISPERSION) {
+        path_wavelength_um = spectral_wavelength_um(smp_next_1d(&rng));
+        path_has_spectral_weight = false;
+      }
       medium_sigma = vec3<f32>(0.0);
       in_medium = false;
       medium_stack_depth = 0u;
@@ -1255,8 +1263,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
       let wo = -ray_dir;
       var point = int_build_shading_point(surface_hit, wo, ray_cone);
-      var closure = closure_build(&point, wo);
+      var closure = closure_build(&point, wo, path_wavelength_um);
       let material = materials[point.material_index];
+      // The path takes the colour of its wavelength where it first meets a dispersive glass; the mean of the weight is one, so
+      // the paths that are not split by the glass keep the colour they had.
+      let is_dispersive_glass = SCENE_HAS_DISPERSION
+        && (material.transmission_weight > 0.0 || material.transmission_tex >= 0)
+        && (material.flags & MATERIAL_FLAG_THIN_WALLED) == 0u
+        && closure_material_dispersion(point.material_index) > 0.0;
+      if (is_dispersive_glass && !path_has_spectral_weight) {
+        throughput *= spectral_rgb_weight(path_wavelength_um);
+        path_has_spectral_weight = true;
+      }
       let is_pure_transparent = closure.lobe_count == 1u && closure.lobes[0].lobe_type == LOBE_TRANSPARENT;
 
       if (!recorded_features && !is_pure_transparent) {

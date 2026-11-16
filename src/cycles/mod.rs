@@ -34,6 +34,7 @@ pub(crate) const KP_PORTAL_COUNT_BYTE: usize = 308; // u32[77]
 
 // ---- MaterialRecord byte offsets (256-byte stride, verified against pack-input-v2.mjs) ----
 const MAT_METALLIC_BYTE: usize = 12;           // f32[3]
+const MAT_ROUGHNESS_BYTE: usize = 16;          // f32[4], the `dispersion` of an extension record
 const MAT_ANISOTROPY_BYTE: usize = 44;         // f32[11]
 const MAT_TRANSMISSION_WEIGHT_BYTE: usize = 52; // f32[13]
 const MAT_COAT_WEIGHT_BYTE: usize = 76;         // f32[19]
@@ -304,6 +305,7 @@ pub(crate) struct SceneSpecialization {
     has_emission_map: bool,
     has_diffuse_transmission: bool,
     has_casters: bool,
+    has_dispersion: bool,
     max_closure_lobes: u32,
     max_closure_candidates: u32,
     has_finite_lights: bool,
@@ -311,6 +313,15 @@ pub(crate) struct SceneSpecialization {
     has_emissive_triangles: bool,
     has_analytic_lights: bool,
     light_tree_node_count: u32,
+}
+
+/// True when the extension record of some material holds a positive number at `word_byte` (FORMAT-v2.md, "Material extension
+/// records"). The caller has checked that the table holds the second run.
+fn extension_run_has_word(materials: &[u8], material_count: usize, word_byte: usize) -> bool {
+    (0..material_count).any(|material| {
+        let base = (material_count + material) * MATERIAL_RECORD_STRIDE;
+        read_f32_le(materials, base + word_byte) > 0.0
+    })
 }
 
 /// Walks the materials, lights and instances of an input once.
@@ -335,7 +346,12 @@ pub(crate) fn scan_scene_specialization(input: &NativeTraceInputV2) -> SceneSpec
     let mut has_emission_map = false;
     // A material table that holds a second set of `material_count` records carries the extension records of diffuse
     // transmission (FORMAT-v2.md, "Material extension records"); each material then adds at most one lobe for the far side.
-    let has_diffuse_transmission = mat_count > 0 && mats.len() >= 2 * mat_count * MATERIAL_RECORD_STRIDE;
+    let has_extension_records = mat_count > 0 && mats.len() >= 2 * mat_count * MATERIAL_RECORD_STRIDE;
+    let has_dispersion = has_extension_records && extension_run_has_word(mats, mat_count, MAT_ROUGHNESS_BYTE);
+    // A table whose extension records carry dispersion only (a prism, a gem) compiles none of the diffuse transmission code. A
+    // table with neither keeps the lobe, as every table with extension records did before dispersion existed.
+    let has_diffuse_transmission = has_extension_records
+        && (extension_run_has_word(mats, mat_count, MAT_METALLIC_BYTE) || !has_dispersion);
     let diffuse_transmission_lobe = u32::from(has_diffuse_transmission);
     let mut max_closure_lobes: u32 = if mat_count > 0 { 1 } else { DEFAULT_CLOSURE_LOBES };
     let mut max_closure_candidates: u32 = if mat_count > 0 { 1 } else { MAX_CLOSURE_CANDIDATE_LOBES };
@@ -496,6 +512,7 @@ pub(crate) fn scan_scene_specialization(input: &NativeTraceInputV2) -> SceneSpec
         has_emission_map,
         has_diffuse_transmission,
         has_casters: has_caster && has_receiver,
+        has_dispersion,
         max_closure_lobes,
         max_closure_candidates,
         has_finite_lights,
@@ -531,6 +548,7 @@ pub(crate) fn specialize_kernel_source(source: &str, scene: &SceneSpecialization
         has_emission_map,
         has_diffuse_transmission,
         has_casters,
+        has_dispersion,
         max_closure_lobes,
         max_closure_candidates,
         has_finite_lights,
@@ -569,6 +587,9 @@ pub(crate) fn specialize_kernel_source(source: &str, scene: &SceneSpecialization
     // Unlike the other sentinels this one defaults to `false`, so a kernel compiled without specialization reads no extension records.
     if has_diffuse_transmission {
         result = result.replace("const SCENE_HAS_DIFFUSE_TRANSMISSION: bool = false;", "const SCENE_HAS_DIFFUSE_TRANSMISSION: bool = true;");
+    }
+    if has_dispersion {
+        result = result.replace("const SCENE_HAS_DISPERSION: bool = false;", "const SCENE_HAS_DISPERSION: bool = true;");
     }
     specialize!(EMISSIVE_TRIANGLES, has_emissive_triangles);
     specialize!(EMISSION_MAP, has_emission_map);
@@ -805,6 +826,68 @@ mod specialization_tests {
             plain_scene.max_closure_candidates + 1,
             "the far side lobe is one more candidate"
         );
+    }
+
+    fn extension_table_with_words(material_words: &[(usize, f32)]) -> Vec<u8> {
+        let mut table = make_mat(1.0, 0.0, 0.0, 0.0, 0.0, 0, 0, -1, -1);
+        let mut extension = vec![0u8; MATERIAL_RECORD_STRIDE];
+        for (byte, value) in material_words {
+            extension[*byte..*byte + 4].copy_from_slice(&value.to_bits().to_le_bytes());
+        }
+        table.extend_from_slice(&extension);
+        table
+    }
+
+    #[test]
+    fn dispersion_follows_the_extension_records_and_is_off_without_them() {
+        let kp = make_kp(0, 0.0, 0, 0, 0.0);
+        let inst = make_default_inst();
+        let lights = make_default_light();
+        let source = "const SCENE_HAS_DISPERSION: bool = false;
+const SCENE_HAS_DIFFUSE_TRANSMISSION: bool = false;";
+
+        let glass_only = make_mat(1.0, 0.0, 0.0, 0.0, 0.0, 0, 0, -1, -1);
+        let plain = dummy_input(&kp, &glass_only, &lights, &inst);
+        assert!(!scan_scene_specialization(&plain).has_dispersion, "no extension records, no dispersion");
+        assert_eq!(specialize_cycles_kernel(source, &plain), source, "the kernel of a scene without dispersion is the default one");
+
+        let zero_table = extension_table_with_words(&[(MAT_METALLIC_BYTE, 0.5)]);
+        let mut zero_dispersion = dummy_input(&kp, &zero_table, &lights, &inst);
+        zero_dispersion.material_count = 1;
+        assert!(!scan_scene_specialization(&zero_dispersion).has_dispersion, "an extension record with dispersion 0 stays off");
+        assert!(!specialize_cycles_kernel(source, &zero_dispersion).contains("SCENE_HAS_DISPERSION: bool = true;"));
+
+        let prism_table = extension_table_with_words(&[(MAT_ROUGHNESS_BYTE, 1.0)]);
+        let mut prism = dummy_input(&kp, &prism_table, &lights, &inst);
+        prism.material_count = 1;
+        let prism_kernel = specialize_cycles_kernel(source, &prism);
+        assert!(prism_kernel.contains("SCENE_HAS_DISPERSION: bool = true;"), "dispersion above 0 turns the spectral path on");
+        assert!(
+            prism_kernel.contains("SCENE_HAS_DIFFUSE_TRANSMISSION: bool = false;"),
+            "a table with dispersion only compiles no diffuse transmission"
+        );
+
+        let both_table = extension_table_with_words(&[(MAT_ROUGHNESS_BYTE, 1.0), (MAT_METALLIC_BYTE, 0.5)]);
+        let mut both = dummy_input(&kp, &both_table, &lights, &inst);
+        both.material_count = 1;
+        let both_kernel = specialize_cycles_kernel(source, &both);
+        assert!(both_kernel.contains("SCENE_HAS_DISPERSION: bool = true;"));
+        assert!(both_kernel.contains("SCENE_HAS_DIFFUSE_TRANSMISSION: bool = true;"));
+    }
+
+    #[test]
+    fn dispersion_code_is_behind_its_constant_so_a_scene_without_it_renders_as_before() {
+        let kernel = assemble_cycles_kernel().expect("the kernel assembles");
+        assert!(kernel.contains("const SCENE_HAS_DISPERSION: bool = false;"), "the default is off");
+        // The wavelength is drawn only for a dispersive scene: an unconditional draw would move every later sample of every scene.
+        assert!(kernel.contains("if (SCENE_HAS_DISPERSION) {
+        path_wavelength_um = spectral_wavelength_um(smp_next_1d(&rng));"));
+        assert!(kernel.contains("let is_dispersive_glass = SCENE_HAS_DISPERSION
+"), "the path weight needs the constant");
+        assert!(kernel.contains("if (SCENE_HAS_DISPERSION) {
+        glass_ior = bsdf_glass_dispersive_ior("), "the index follows the wavelength only when on");
+        assert!(kernel.contains("if (SCENE_HAS_DISPERSION && arrayLength(&materials) >= 2u * kernel_params.material_count) {"));
+        assert!(kernel.contains("fn closure_build(point: ptr<function, ShadingPoint>, wo: vec3<f32>, wavelength_um: f32)"));
     }
 
     #[test]

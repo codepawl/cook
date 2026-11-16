@@ -519,7 +519,17 @@ fn closure_add_candidate(closure: ptr<function, Closure>, scratch: ptr<function,
   (*closure).lobe_count = slot + 1u;
 }
 
-fn closure_build(point: ptr<function, ShadingPoint>, wo: vec3<f32>) -> Closure {
+// The `dispersion` of a material (glTF `KHR_materials_dispersion`, Blender's Principled `Dispersion`): the extension record
+// keeps it in the word of `roughness`. Zero for a scene without dispersion, whose table has no such record to read.
+fn closure_material_dispersion(material_index: u32) -> f32 {
+  if (SCENE_HAS_DISPERSION && arrayLength(&materials) >= 2u * kernel_params.material_count) {
+    return max(materials[kernel_params.material_count + material_index].roughness, 0.0);
+  }
+  return 0.0;
+}
+
+// `wavelength_um` is the hero wavelength of the path (micrometres); a scene without dispersion ignores it.
+fn closure_build(point: ptr<function, ShadingPoint>, wo: vec3<f32>, wavelength_um: f32) -> Closure {
   var closure: Closure;
   for (var lobe_slot: u32 = 0u; lobe_slot < MAX_CLOSURE_LOBES; lobe_slot = lobe_slot + 1u) {
     closure.lobes[lobe_slot] = closure_empty_lobe();
@@ -789,12 +799,16 @@ fn closure_build(point: ptr<function, ShadingPoint>, wo: vec3<f32>) -> Closure {
         closure_add_candidate(&closure, &candidates, thin_trans_lobe);
       }
     } else {
+      var glass_ior = ior;
+      if (SCENE_HAS_DISPERSION) {
+        glass_ior = bsdf_glass_dispersive_ior(ior, closure_material_dispersion((*point).material_index), wavelength_um);
+      }
       let glass_lobe = bsdf_glass_setup_lobe(
         valid_refl_n,
         aniso_t,
         wo_dir,
         trans_w,
-        ior,
+        glass_ior,
         (*point).front_face,
         specular_tint,
         sqrt(clamped_base_color),
@@ -1150,7 +1164,7 @@ fn test_lobe_samples(@builtin(global_invocation_id) gid: vec3<u32>) {
   point.light_group_mask_hi = 0xFFFFFFFFu;
 
   let wo = bsdf_mf_safe_normalize_fallback(kernel_params.camera_forward, vec3<f32>(0.0, 0.0, 1.0));
-  var closure = closure_build(&point, wo);
+  var closure = closure_build(&point, wo, SPECTRAL_D_LINE_UM);
   let mode = kernel_params.kernel_flags;
 
   var eval_wi = vec3<f32>(0.0);

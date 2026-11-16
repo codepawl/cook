@@ -766,6 +766,28 @@ export function validateDiffuseTransmission(material) {
   }
 }
 
+/** The largest `dispersion` a material may carry: glTF `KHR_materials_dispersion` is `20 / Abbe number`, and no glass is below an Abbe number of 2. */
+export const MAX_DISPERSION = 10;
+
+/**
+ * The dispersion of a transmissive material, as glTF `KHR_materials_dispersion` and Blender's Principled `Dispersion` give it:
+ * `20 / Abbe number`. 0 (or no field) is a glass with one index for every wavelength; 1 is the OpenPBR default, an Abbe number
+ * of 20. Only a non-thin-walled glass that transmits uses it.
+ */
+export function validateDispersion(material) {
+  const { dispersion } = material;
+  if (dispersion === undefined) return;
+  const isDispersion = typeof dispersion === 'number' && Number.isFinite(dispersion) && dispersion >= 0 && dispersion <= MAX_DISPERSION;
+  if (!isDispersion) {
+    throw new RangeError(`dispersion must be a number from 0 to ${MAX_DISPERSION} (20 divided by the Abbe number), got ${String(dispersion)}. Use 0 for a glass without colour fringes and 1 for the OpenPBR default.`);
+  }
+}
+
+function resolveDispersion(material) {
+  validateDispersion(material);
+  return material.dispersion > 0 ? material.dispersion : 0;
+}
+
 function resolveDiffuseTransmission(material) {
   validateDiffuseTransmission(material);
   const weight = material.diffuseTransmission ?? 0;
@@ -784,38 +806,41 @@ function resolveDiffuseTransmission(material) {
  * One 256 B extension record (`FORMAT-v2.md`, "Material extension records"): the weight where `metallic` sits in a material
  * record, the colour where `base_color` sits and the extension flags where `flags` sits.
  */
-function packMaterialExtensionRecord(diffuseTransmission) {
+function packMaterialExtensionRecord(diffuseTransmission, dispersion) {
   const buffer = new ArrayBuffer(STRUCT_STRIDES_V2.material);
-  if (!diffuseTransmission) {
-    return new Uint8Array(buffer);
-  }
   const f32 = new Float32Array(buffer);
   const u32 = new Uint32Array(buffer);
-  f32[0] = diffuseTransmission.color[0];
-  f32[1] = diffuseTransmission.color[1];
-  f32[2] = diffuseTransmission.color[2];
-  f32[3] = diffuseTransmission.weight;
-  u32[48] = diffuseTransmission.tintsBaseColor ? MATERIAL_EXTENSION_FLAG_TINTS_BASE_COLOR : 0;
+  if (diffuseTransmission) {
+    f32[0] = diffuseTransmission.color[0];
+    f32[1] = diffuseTransmission.color[1];
+    f32[2] = diffuseTransmission.color[2];
+    f32[3] = diffuseTransmission.weight;
+    u32[48] = diffuseTransmission.tintsBaseColor ? MATERIAL_EXTENSION_FLAG_TINTS_BASE_COLOR : 0;
+  }
+  // The word where `roughness` sits in a material record.
+  f32[4] = dispersion;
   return new Uint8Array(buffer);
 }
 
 /**
- * The material table of a list of packed records. When any record carries diffuse transmission, a second run of
+ * The material table of a list of packed records. When any record carries diffuse transmission or dispersion, a second run of
  * `records.length` extension records follows the records (the header's `materialCount` still counts the first run only);
  * otherwise the table is the records alone, as it always was.
  */
 function packMaterialTable(materialRecords) {
   const stride = STRUCT_STRIDES_V2.material;
   const usesDiffuseTransmission = materialRecords.some(record => record.diffuseTransmission);
+  const usesDispersion = materialRecords.some(record => record.dispersion > 0);
+  const hasExtensionRecords = usesDiffuseTransmission || usesDispersion;
   const runCount = Math.max(1, materialRecords.length);
-  const table = new Uint8Array(runCount * stride * (usesDiffuseTransmission ? 2 : 1));
+  const table = new Uint8Array(runCount * stride * (hasExtensionRecords ? 2 : 1));
   materialRecords.forEach((record, index) => table.set(record.bytes, index * stride));
-  if (usesDiffuseTransmission) {
+  if (hasExtensionRecords) {
     materialRecords.forEach((record, index) => {
-      table.set(packMaterialExtensionRecord(record.diffuseTransmission), (runCount + index) * stride);
+      table.set(packMaterialExtensionRecord(record.diffuseTransmission, record.dispersion), (runCount + index) * stride);
     });
   }
-  return { table, usesDiffuseTransmission };
+  return { table, usesDiffuseTransmission, usesDispersion };
 }
 
 // The kernel never reads `shadow_terminator_offset`, so a nonzero value would render like 0 and look like a Cycles mismatch.
@@ -891,6 +916,7 @@ export function packMaterialRecordV2(material = {}, textureCollector = null) {
   const { emissionColor, emissionStrength } = resolveEmissionFields(material);
   const subsurface = resolveSubsurfaceFields(material, baseColor);
   const diffuseTransmission = resolveDiffuseTransmission(material);
+  const dispersion = resolveDispersion(material);
   const normalScale = resolveNormalScale(material.normalScale);
   const coatNormalScale = Number(material.coatNormalScale ?? 1);
   const bumpDistance = Math.max(0, Number(material.bumpDistance ?? 0));
@@ -1058,6 +1084,7 @@ export function packMaterialRecordV2(material = {}, textureCollector = null) {
     alphaMode,
     usesSubsurface: subsurface.weight > 0,
     diffuseTransmission,
+    dispersion,
     isEmissive: (flags & MATERIAL_FLAG_EMISSIVE_MIS) !== 0 && luminance(meanEmissiveRadiance) > 0,
     meanEmissiveRadiance,
   };
@@ -2949,6 +2976,7 @@ function materialRecordsAreEqual(first, second) {
   if (first.isEmissive !== second.isEmissive || first.usesSubsurface !== second.usesSubsurface || first.alphaMode !== second.alphaMode) return false;
   if (first.meanEmissiveRadiance.some((value, channel) => !Object.is(value, second.meanEmissiveRadiance[channel]))) return false;
   if (!diffuseTransmissionsAreEqual(first.diffuseTransmission, second.diffuseTransmission)) return false;
+  if (!Object.is(first.dispersion, second.dispersion)) return false;
   const firstWords = materialRecordWords(first.bytes);
   const secondWords = materialRecordWords(second.bytes);
   for (let index = 0; index < firstWords.length; index++) {
