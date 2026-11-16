@@ -1,0 +1,6 @@
+d1b0e38684af01928e2b766a4a7abc261e1b72bda7df8eeb95663cce1cbdcc9e  ../out/gem-feature-plain.cook.npy
+d1b0e38684af01928e2b766a4a7abc261e1b72bda7df8eeb95663cce1cbdcc9e  ../out/gem-base-plain.cook.npy
+98ba14170550b370821394dc59ee7d6f92b51d6b85cb28fa446c71a7608dd992  ../out/prism-view-feature-plain.cook.npy
+98ba14170550b370821394dc59ee7d6f92b51d6b85cb28fa446c71a7608dd992  ../out/prism-view-base-plain.cook.npy
+74b22ca165b04da352530a576085b53c3ee71bba1d0c2051140b6c2633af3047  ../out/prism-floor-feature-plain.cook.npy
+74b22ca165b04da352530a576085b53c3ee71bba1d0c2051140b6c2633af3047  ../out/prism-floor-base-plain.cook.npy
