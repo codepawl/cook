@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [pdf-leaf-break-not-return, pdf-leaf-count-one, pdf-leaf-no-slot-capture, pdf-leaf-no-count]
+        variant: [base, sample-off, pdf-off]
     defaults:
       run:
         shell: bash
