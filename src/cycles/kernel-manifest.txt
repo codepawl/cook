@@ -12,4 +12,5 @@ bsdf_coat.wgsl
 closure.wgsl
 lights.wgsl
 light_tree.wgsl
+mnee.wgsl
 integrator.wgsl

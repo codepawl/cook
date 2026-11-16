@@ -811,6 +811,7 @@ fn int_accumulate_direct_sample(
   in_medium: bool,
   bounce: u32,
   transparent_bounces: u32,
+  try_mnee: bool,
   radiance: ptr<function, vec3<f32>>,
 ) {
   let unshadowed = int_direct_sample_unshadowed(sample, closure, wo, throughput, medium_sigma, in_medium);
@@ -819,6 +820,11 @@ fn int_accumulate_direct_sample(
   }
   let visibility = int_direct_sample_visibility(sample, point, transparent_bounces);
   if (visibility.x <= 0.0 && visibility.y <= 0.0 && visibility.z <= 0.0) {
+    // A blocked straight ray from a caustic receiver may still reach the light through smooth glass (mnee.wgsl).
+    if (SCENE_HAS_CASTERS && try_mnee && sample.is_delta == 0u && sample.cast_shadow != 0u && mnee_instance_is_receiver((*point).instance_index)) {
+      let through_glass = mnee_direct_contribution(sample, closure, point, wo, throughput, transparent_bounces);
+      *radiance += int_clamp_contribution(through_glass, i32(bounce));
+    }
     return;
   }
   *radiance += int_clamp_contribution(unshadowed * visibility, i32(bounce));
@@ -1012,6 +1018,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var prev_recv_hi = 0xFFFFFFFFu;
   var terminate_on_hit = false;
   var terminate_on_next_surface = false;
+  // Caustics: the path left a caustic receiver by a diffuse or glossy bounce, and has since crossed a smooth glass caster. Light it
+  // finds from there is the light mnee_direct_contribution estimates, so it counts nothing here (it would count twice).
+  var mnee_from_receiver = false;
+  var mnee_light_through_caster = false;
 
   var bounce = 0u;
   var diffuse_bounces = 0u;
@@ -1069,6 +1079,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       prev_recv_hi = 0xFFFFFFFFu;
       terminate_on_hit = false;
       terminate_on_next_surface = false;
+      mnee_from_receiver = false;
+      mnee_light_through_caster = false;
 
       bounce = 0u;
       diffuse_bounces = 0u;
@@ -1135,7 +1147,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         in_medium,
         medium_sigma,
       );
-      if (analytic_emission.x > 0.0 || analytic_emission.y > 0.0 || analytic_emission.z > 0.0) {
+      if (!(SCENE_HAS_CASTERS && mnee_light_through_caster) && (analytic_emission.x > 0.0 || analytic_emission.y > 0.0 || analytic_emission.z > 0.0)) {
         sample_radiance += int_clamp_contribution(throughput * analytic_emission, i32(bounce) - 1);
       }
 
@@ -1199,6 +1211,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         is_camera_ray = false;
         camera_visible_environment = false;
         is_transparent_bg_ray = false;
+        mnee_from_receiver = false;
+        mnee_light_through_caster = false;
         mis_skip = false;
         prev_bsdf_pdf = phase_pdf;
         min_ray_pdf = min(phase_pdf, min_ray_pdf);
@@ -1267,9 +1281,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           prev_recv_lo,
           prev_recv_hi,
         );
-        if (emission_weight > 0.0) {
+        if (emission_weight > 0.0 && !(SCENE_HAS_CASTERS && mnee_light_through_caster)) {
           sample_radiance += int_clamp_contribution(throughput * closure.emission * emission_weight, i32(bounce) - 1);
         }
+      }
+
+      if (SCENE_HAS_CASTERS && mnee_from_receiver && mnee_hit_is_smooth_caster(point.instance_index, point.material_index)) {
+        mnee_light_through_caster = true;
       }
 
       if (terminate_on_next_surface) {
@@ -1309,7 +1327,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       let picks_through_tree = lgt_use_light_tree() && (kernel_params.light_count + kernel_params.emissive_triangle_count) > 0u;
       let closure_has_transmission = (SCENE_HAS_GLASS || SCENE_HAS_DIFFUSE_TRANSMISSION) && int_closure_has_transmission(&closure);
       // The white-noise sampler hands out draws in order, not by slot, so skipping the loop would shift the draws that follow it.
-      let pick_one_shadow_ray = (kernel_params.kernel_flags & KERNEL_FLAG_SHADOW_RAY_PICK) != 0u;
+      // With casters every sample gets its own shadow ray, so a blocked one can fall back to the glass solver.
+      let pick_one_shadow_ray = (kernel_params.kernel_flags & KERNEL_FLAG_SHADOW_RAY_PICK) != 0u && !SCENE_HAS_CASTERS;
       var candidate_samples: array<LgtDirectSample, 3>;
       var candidate_unshadowed = array<vec3<f32>, 3>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
       let direct_source_count = select(0u, 3u, rng.use_sobol_burley == 0u || int_closure_has_evaluable_lobe(&closure));
@@ -1353,7 +1372,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           candidate_samples[direct_source] = direct_sample;
           candidate_unshadowed[direct_source] = int_direct_sample_unshadowed(direct_sample, &closure, wo, throughput, medium_sigma, in_medium);
         } else {
-          int_accumulate_direct_sample(direct_sample, &closure, &point, wo, throughput, medium_sigma, in_medium, bounce, transparent_bounces, &sample_radiance);
+          int_accumulate_direct_sample(direct_sample, &closure, &point, wo, throughput, medium_sigma, in_medium, bounce, transparent_bounces, direct_source < 2u, &sample_radiance);
         }
       }
       if (pick_one_shadow_ray && direct_source_count > 0u) {
@@ -1384,6 +1403,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
       let is_singular = int_is_singular_bsdf_sample(&closure, &point, bsdf_sample);
       throughput *= bsdf_sample.eval / bsdf_sample.pdf;
+      if (SCENE_HAS_CASTERS && !is_singular) {
+        mnee_from_receiver = mnee_instance_is_receiver(point.instance_index);
+        mnee_light_through_caster = false;
+      }
 
       bounce += 1u;
       let cos_ng_wi = dot(point.geometric_normal, bsdf_sample.wi);

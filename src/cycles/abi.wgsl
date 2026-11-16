@@ -70,6 +70,10 @@ const INSTANCE_VISIBILITY_TRANSMISSION: u32 = 8u;
 const INSTANCE_VISIBILITY_SHADOW: u32 = 16u;
 const INSTANCE_VISIBILITY_VOLUME_SCATTER: u32 = 32u;
 const INSTANCE_FLAG_NEGATIVE_SCALE: u32 = 64u;
+// Caustic caster: smooth glass whose refraction of a small emitter is solved by manifold next-event estimation (mnee.wgsl).
+const INSTANCE_FLAG_CASTER: u32 = 128u;
+// Caustic receiver: a surface that takes that light. Both kinds must exist in the scene for the estimator to run.
+const INSTANCE_FLAG_RECEIVER: u32 = 256u;
 
 // `TriangleRecord.flags` bits.
 const TRIANGLE_FLAG_SMOOTH_NORMALS: u32 = 1u;
@@ -133,6 +137,8 @@ const SCENE_HAS_F82: bool = true;
 // flags above, `false` is the safe default: only the host's specialization turns it on, for a table that carries them.
 const SCENE_HAS_DIFFUSE_TRANSMISSION: bool = false;
 const SCENE_HAS_NORMAL_MAP: bool = true;
+// A caster and a receiver both exist (INSTANCE_FLAG_CASTER, INSTANCE_FLAG_RECEIVER). False compiles the caustic estimator out.
+const SCENE_HAS_CASTERS: bool = true;
 // False when the frame leaves KERNEL_FLAG_TEXTURE_MIPS off: the ray cone and the trilinear lookup then compile out. Left in
 // as run-time branches they cost a fogged, textured scene about five times the sampling time though it never used them.
 const SCENE_HAS_TEXTURE_MIPS: bool = true;

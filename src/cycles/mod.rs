@@ -66,6 +66,10 @@ const LIGHT_GROUP_MASK_HI_BYTE: usize = 124;  // u32[31]
 const LIGHT_RECORD_STRIDE: usize = 128;
 
 // ---- InstanceRecord byte offsets (160-byte stride) ----
+const INSTANCE_VISIBILITY_FLAGS_BYTE: usize = 116; // u32[29]
+/// `InstanceRecord.visibility_flags` bits of the caustic estimator (FORMAT-v2.md): smooth glass that refracts a light, and a surface that receives it.
+const INSTANCE_FLAG_CASTER: u32 = 128;
+const INSTANCE_FLAG_RECEIVER: u32 = 256;
 const INSTANCE_LIGHT_GROUP_MASK_LO_BYTE: usize = 120; // u32[30]
 const INSTANCE_LIGHT_GROUP_MASK_HI_BYTE: usize = 124; // u32[31]
 const INSTANCE_RECORD_STRIDE: usize = 160;
@@ -299,6 +303,7 @@ pub(crate) struct SceneSpecialization {
     has_normal_map: bool,
     has_emission_map: bool,
     has_diffuse_transmission: bool,
+    has_casters: bool,
     max_closure_lobes: u32,
     max_closure_candidates: u32,
     has_finite_lights: bool,
@@ -436,6 +441,18 @@ pub(crate) fn scan_scene_specialization(input: &NativeTraceInputV2) -> SceneSpec
     // --- Per-instance and per-light light-linking flags ---
     let instance_count = input.instance_count as usize;
     let mut has_light_linking = false;
+    let mut has_caster = false;
+    let mut has_receiver = false;
+
+    for i in 0..instance_count {
+        let base = i * INSTANCE_RECORD_STRIDE;
+        if base + INSTANCE_RECORD_STRIDE > instances.len() {
+            break;
+        }
+        let visibility = read_u32_le(&instances[base..base + INSTANCE_RECORD_STRIDE], INSTANCE_VISIBILITY_FLAGS_BYTE);
+        has_caster |= (visibility & INSTANCE_FLAG_CASTER) != 0;
+        has_receiver |= (visibility & INSTANCE_FLAG_RECEIVER) != 0;
+    }
 
     for i in 0..instance_count {
         let base = i * INSTANCE_RECORD_STRIDE;
@@ -478,6 +495,7 @@ pub(crate) fn scan_scene_specialization(input: &NativeTraceInputV2) -> SceneSpec
         has_normal_map,
         has_emission_map,
         has_diffuse_transmission,
+        has_casters: has_caster && has_receiver,
         max_closure_lobes,
         max_closure_candidates,
         has_finite_lights,
@@ -512,6 +530,7 @@ pub(crate) fn specialize_kernel_source(source: &str, scene: &SceneSpecialization
         has_normal_map,
         has_emission_map,
         has_diffuse_transmission,
+        has_casters,
         max_closure_lobes,
         max_closure_candidates,
         has_finite_lights,
@@ -545,6 +564,7 @@ pub(crate) fn specialize_kernel_source(source: &str, scene: &SceneSpecialization
     specialize!(THIN_FILM, has_thin_film);
     specialize!(F82, has_f82);
     specialize!(NORMAL_MAP, has_normal_map);
+    specialize!(CASTERS, has_casters);
     specialize!(TEXTURE_MIPS, (kernel_flags & KERNEL_FLAG_TEXTURE_MIPS) != 0);
     // Unlike the other sentinels this one defaults to `false`, so a kernel compiled without specialization reads no extension records.
     if has_diffuse_transmission {
@@ -714,6 +734,35 @@ mod specialization_tests {
             result.contains("const MAX_CLOSURE_CANDIDATES: u32 = 2u; // SPECIALIZE_CANDIDATES"),
             "MAX_CLOSURE_CANDIDATES should be 2u"
         );
+    }
+
+    fn instance_with_visibility(visibility: u32) -> Vec<u8> {
+        let mut inst = make_default_inst();
+        inst[INSTANCE_VISIBILITY_FLAGS_BYTE..INSTANCE_VISIBILITY_FLAGS_BYTE + 4].copy_from_slice(&visibility.to_le_bytes());
+        inst
+    }
+
+    fn caster_source_after_specializing(instances: &[u8]) -> String {
+        let kp = make_kp(0, 0.0, 0, 0, 0.0);
+        let mat = make_mat(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, -1, -1);
+        let lights = make_default_light();
+        let input = dummy_input(&kp, &mat, &lights, instances);
+        specialize_cycles_kernel("const SCENE_HAS_CASTERS: bool = true;", &input)
+    }
+
+    /// The caustic estimator is compiled in only for a scene with a caster and a receiver; every other scene compiles it out, so its
+    /// kernel and its image are those of a build without the estimator.
+    #[test]
+    fn caustic_estimator_compiles_in_only_with_a_caster_and_a_receiver() {
+        let plain = instance_with_visibility(0x3F);
+        assert!(caster_source_after_specializing(&plain).contains("const SCENE_HAS_CASTERS: bool = false;"));
+        let only_casters = instance_with_visibility(0x3F | INSTANCE_FLAG_CASTER);
+        assert!(caster_source_after_specializing(&only_casters).contains("const SCENE_HAS_CASTERS: bool = false;"));
+        let only_receivers = instance_with_visibility(0x3F | INSTANCE_FLAG_RECEIVER);
+        assert!(caster_source_after_specializing(&only_receivers).contains("const SCENE_HAS_CASTERS: bool = false;"));
+        let mut both = instance_with_visibility(0x3F | INSTANCE_FLAG_CASTER);
+        both.extend(instance_with_visibility(0x3F | INSTANCE_FLAG_RECEIVER));
+        assert!(caster_source_after_specializing(&both).contains("const SCENE_HAS_CASTERS: bool = true;"));
     }
 
     #[test]
