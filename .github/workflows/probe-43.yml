@@ -54,6 +54,20 @@ jobs:
           start=$(date +%s)
           node tools/probe-warp-43.mjs warp 2>&1 | tee probe-warp.log
           echo "PROBE_SECONDS warp $(( $(date +%s) - start ))"
+      - name: Diagnose the WARP device loss and the missing adapter
+        continue-on-error: true
+        env:
+          COOK_WGPU_BACKEND: dx12
+        run: |
+          echo "--- tree variant, small dispatches"
+          PROBE_ONLY=tree PROBE_SAMPLES=4 PROBE_WIDTH=16 PROBE_HEIGHT=8 node tools/probe-warp-43.mjs warp-tree-small 2>&1 | cut -c1-400
+          echo "--- tree variant with the TDR timeout raised"
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" //v TdrDelay //t REG_DWORD //d 120 //f || true
+          PROBE_ONLY=tree PROBE_SAMPLES=32 node tools/probe-warp-43.mjs warp-tree-tdr 2>&1 | cut -c1-400
+          for file in tests/gpu/post.test.mjs tests/gpu/render.test.mjs tests/engine.test.mjs; do
+            echo "--- $file alone"
+            node --test "$file" 2>&1 | grep -E "^(✖|ℹ (pass|fail))|No DX12|device was lost" | cut -c1-300 | head -20
+          done
       - name: npm test on WARP
         env:
           COOK_WGPU_BACKEND: dx12
