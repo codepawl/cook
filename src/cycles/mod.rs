@@ -18,6 +18,8 @@ include!(concat!(env!("OUT_DIR"), "/cycles_manifest_files.rs"));
 // ---- KernelParamsV2 byte offsets (verified against pack-input-v2.mjs and abi.wgsl) ----
 const KERNEL_FLAG_LIGHT_TREE_PROBE: u32 = 128;
 const KERNEL_FLAG_TEXTURE_MIPS: u32 = 2048;
+const KERNEL_FLAG_HAS_GRID_VOLUME: u32 = 8192;
+const KP_GRID_VOLUME_COUNT_BYTE: usize = 324; // u32[81]
 const KP_KERNEL_FLAGS_BYTE: usize = 32;    // u32[8]
 const KP_ENV_WIDTH_BYTE: usize = 192;      // u32[48]
 const KP_ENV_HEIGHT_BYTE: usize = 196;     // u32[49]
@@ -515,6 +517,7 @@ pub(crate) fn specialize_kernel_source(source: &str, scene: &SceneSpecialization
     let env_total_weight = read_f32_le(kp, KP_ENV_TOTAL_WEIGHT_BYTE);
 
     let has_volume = (kernel_flags & 2) != 0 && volume_density > 0.0;
+    let has_grid_volume = (kernel_flags & KERNEL_FLAG_HAS_GRID_VOLUME) != 0 && read_u32_le(kp, KP_GRID_VOLUME_COUNT_BYTE) > 0;
     let has_env_importance = env_width > 0 && env_height > 0 && env_total_weight > 0.0;
     let has_light_tree = (kernel_flags & 1) != 0 && scene.light_tree_node_count > 0;
     let SceneSpecialization {
@@ -570,6 +573,10 @@ pub(crate) fn specialize_kernel_source(source: &str, scene: &SceneSpecialization
     }
     if has_dispersion {
         result = result.replace("const SCENE_HAS_DISPERSION: bool = false;", "const SCENE_HAS_DISPERSION: bool = true;");
+    }
+    // Defaults to `false` like the two above: a pack with no grid volumes compiles to the kernel it had before they existed.
+    if has_grid_volume {
+        result = result.replace("const SCENE_HAS_GRID_VOLUME: bool = false;", "const SCENE_HAS_GRID_VOLUME: bool = true;");
     }
     specialize!(EMISSIVE_TRIANGLES, has_emissive_triangles);
     specialize!(EMISSION_MAP, has_emission_map);
@@ -735,6 +742,33 @@ mod specialization_tests {
             result.contains("const MAX_CLOSURE_CANDIDATES: u32 = 2u; // SPECIALIZE_CANDIDATES"),
             "MAX_CLOSURE_CANDIDATES should be 2u"
         );
+    }
+
+    #[test]
+    fn grid_volumes_compile_in_only_for_a_pack_that_carries_them() {
+        let source = "const SCENE_HAS_GRID_VOLUME: bool = false;";
+        let scene = scan_scene_specialization(&dummy_input(&make_kp(0, 0.0, 0, 0, 0.0), &[], &[], &[]));
+
+        let without = make_kp(0, 0.0, 0, 0, 0.0);
+        assert_eq!(specialize_kernel_source(source, &scene, &without), source, "no flag, no grids: the default stays false");
+
+        let mut flag_without_grids = make_kp(KERNEL_FLAG_HAS_GRID_VOLUME, 0.0, 0, 0, 0.0);
+        assert_eq!(specialize_kernel_source(source, &scene, &flag_without_grids), source, "the flag alone with a count of 0 compiles no grid code");
+
+        flag_without_grids[KP_GRID_VOLUME_COUNT_BYTE..KP_GRID_VOLUME_COUNT_BYTE + 4].copy_from_slice(&1u32.to_le_bytes());
+        assert!(specialize_kernel_source(source, &scene, &flag_without_grids).contains("const SCENE_HAS_GRID_VOLUME: bool = true;"));
+
+        let mut count_without_flag = make_kp(0, 0.0, 0, 0, 0.0);
+        count_without_flag[KP_GRID_VOLUME_COUNT_BYTE..KP_GRID_VOLUME_COUNT_BYTE + 4].copy_from_slice(&1u32.to_le_bytes());
+        assert_eq!(specialize_kernel_source(source, &scene, &count_without_flag), source, "a count with no flag is not a grid volume pack");
+    }
+
+    #[test]
+    fn the_kernel_carries_the_grid_volume_module_in_the_manifest() {
+        let kernel = assemble_cycles_kernel().expect("the manifest assembles");
+        assert!(kernel.contains("fn vg_track_segment("), "the delta tracking walk");
+        assert!(kernel.contains("fn vg_shadow_transmittance("), "the ratio tracking walk");
+        assert!(kernel.contains("const SCENE_HAS_GRID_VOLUME: bool = false;"), "the default compiles no grid code");
     }
 
     #[test]
@@ -1622,7 +1656,13 @@ mod tests {
         let fetch_start = kernel.find("fn texture_fetch_texel(").expect("the shared texel fetch exists");
         let fetch_end = fetch_start + kernel[fetch_start..].find("\n}").expect("the fetch function ends");
         let reads_inside_fetch = kernel[fetch_start..fetch_end].matches("texture_texels[").count();
-        assert_eq!(kernel.matches("texture_texels[").count(), reads_inside_fetch);
+        // The grid volume module reads its tables and voxels through `vg_word`, which is not a texture sampler.
+        let grid_word_start = kernel.find("fn vg_word(").expect("the grid volume word reader exists");
+        let grid_word_end = grid_word_start + kernel[grid_word_start..].find("
+}").expect("the grid word reader ends");
+        let reads_inside_grid_word = kernel[grid_word_start..grid_word_end].matches("texture_texels[").count();
+        assert_eq!(reads_inside_grid_word, 1);
+        assert_eq!(kernel.matches("texture_texels[").count(), reads_inside_fetch + reads_inside_grid_word);
         assert!(reads_inside_fetch > 0);
         assert!(!kernel.contains("fn int_sample_texture_channel"));
         assert!(!kernel.contains("fn int_wrap_coord"));

@@ -1,6 +1,7 @@
 // Packs a Crucible trace scene (or upgrades a legacy v1 input) into the FORMAT-v2 binary tables read by the Cycles-parity
 // native kernel (`FORMAT-v2.md` and `src/cycles/abi.wgsl`). Pure typed arrays with zero Node-only imports.
 
+import { packGridVolumes, writeGridVolumeKernelParams } from './grid-volume-input.mjs';
 import { buildLightTree } from './light-tree-v2.mjs';
 import { THIN_LENS_FLOAT_INDEXES } from './pack-input.mjs';
 import {
@@ -3330,6 +3331,10 @@ export function buildNativeInputV2(scene, camera, options = {}) {
     : packFlattenedTraceScene(scene, options.parts ?? scene.parts, textureCollector);
 
   const packedTextures = textureCollector.finish();
+  const packedGrids = packGridVolumes(options.gridVolumes ?? scene.gridVolumes, packedTextures.textureTexels.length);
+  if (packedGrids && (packedTextures.textureTexels.length + packedGrids.words.length) * 4 > TEXTURE_POOL_MAX_BYTES) {
+    throw new RangeError(`The textures and the grid volumes need ${(packedTextures.textureTexels.length + packedGrids.words.length) * 4} bytes of texel pool, over its ${TEXTURE_POOL_MAX_BYTES} byte limit. Resample the grids or use smaller textures.`);
+  }
   const packedEmissives = packEmissiveTriangleBuffer(packedGeometry.emissiveList);
   const analyticEntries = buildAnalyticLightEntries(scene.lights);
   const packedLights = packAnalyticLightsBuffer(analyticEntries);
@@ -3360,6 +3365,13 @@ export function buildNativeInputV2(scene, camera, options = {}) {
     rayEpsilon: resolveSurfaceOffset(scene.surfaceOffset, options.rayEpsilon),
     farDistance: Number(scene.farDistance ?? 1e30),
   });
+  let textureTexels = packedTextures.textureTexels;
+  if (packedGrids) {
+    writeGridVolumeKernelParams(kernelParams, packedGrids);
+    textureTexels = new Uint32Array(textureTexels.length + packedGrids.words.length);
+    textureTexels.set(packedTextures.textureTexels, 0);
+    textureTexels.set(packedGrids.words, packedTextures.textureTexels.length);
+  }
 
   return {
     schemaVersion: FORMAT_V2_VERSION,
@@ -3383,7 +3395,7 @@ export function buildNativeInputV2(scene, camera, options = {}) {
     lightToTree: packedLightTree.lightToTree,
     textureDescriptors: packedTextures.textureDescriptors,
     textureCount: counts.textureCount,
-    textureTexels: packedTextures.textureTexels,
+    textureTexels,
     environmentTexels: packedEnvironment.environmentTexels,
   };
 }

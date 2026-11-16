@@ -461,6 +461,10 @@ fn int_trace_shadow(
     }
   }
 
+  if (SCENE_HAS_GRID_VOLUME && kernel_params.grid_volume_count > 0u) {
+    transmittance *= vg_shadow_transmittance(ray_origin, ray_dir, shadow_t_max);
+  }
+
   return transmittance;
 }
 
@@ -900,6 +904,7 @@ fn int_accumulate_volume_direct_sample(
   throughput: vec3<f32>,
   medium_sigma: vec3<f32>,
   in_medium: bool,
+  anisotropy: f32,
   bounce: u32,
   transparent_bounces: u32,
   radiance: ptr<function, vec3<f32>>,
@@ -907,7 +912,7 @@ fn int_accumulate_volume_direct_sample(
   if (sample.valid == 0u || sample.pdf <= 0.0) {
     return;
   }
-  let phase = int_eval_henyey_greenstein(dot(incident_dir, sample.wi), kernel_params.volume_anisotropy);
+  let phase = int_eval_henyey_greenstein(dot(incident_dir, sample.wi), anisotropy);
   let mis_weight = select(lgt_power_heuristic(sample.pdf, phase), 1.0, sample.is_delta != 0u);
   var unshadowed = throughput * sample.radiance * (phase * mis_weight / sample.pdf);
   // The light sample travels through the medium the scatter point sits in, as in the surface estimator.
@@ -1044,6 +1049,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       let sample_index = kernel_params.sample_offset + next_sample;
       next_sample += 1u;
       rng = smp_init(pixel_x, pixel_y, sample_index, kernel_params.seed);
+      if (SCENE_HAS_GRID_VOLUME) {
+        vg_begin_path(rng);
+      }
       let filter_offset = flt_sample_offset(smp_next_2d(&rng));
       let lens_uv = smp_next_2d(&rng);
       let cam_ray = cam_generate_ray(pixel_x, pixel_y, filter_offset, lens_uv);
@@ -1129,6 +1137,32 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
       }
 
+      var grid_scattered = false;
+      var phase_anisotropy = kernel_params.volume_anisotropy;
+      if (SCENE_HAS_GRID_VOLUME && kernel_params.grid_volume_count > 0u) {
+        var grid_emission = vec3<f32>(0.0);
+        let grid_track = vg_track_segment(
+          ray_origin,
+          ray_dir,
+          ray_t_min,
+          select(surface_hit.t, volume_scatter_t, volume_scattered),
+          &throughput,
+          &grid_emission,
+        );
+        if (grid_emission.x > 0.0 || grid_emission.y > 0.0 || grid_emission.z > 0.0) {
+          sample_radiance += int_clamp_contribution(grid_emission, i32(bounce) - 1);
+        }
+        if (grid_track.event == VG_EVENT_ABSORB) {
+          break;
+        }
+        if (grid_track.event == VG_EVENT_SCATTER) {
+          grid_scattered = true;
+          volume_scattered = true;
+          volume_scatter_t = grid_track.t;
+          phase_anisotropy = grid_track.anisotropy;
+        }
+      }
+
       let segment_end_t = select(surface_hit.t, volume_scatter_t, volume_scattered);
       let analytic_emission = lgt_eval_analytic_lights_along_segment(
         ray_origin,
@@ -1154,13 +1188,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         if (in_medium) {
           throughput *= exp(-medium_sigma * max(volume_scatter_t - ray_t_min, 0.0));
         }
-        throughput *= kernel_params.volume_albedo;
+        if (!grid_scattered) {
+          throughput *= kernel_params.volume_albedo;
+        }
         let scatter_pos = ray_origin + ray_dir * volume_scatter_t;
         if (!recorded_features) {
           // Depth stays the distance to the first surface of the camera ray, which the trace above already found, so fog
           // does not pull the averaged depth short. A ray that hits no surface writes 0, as it does without fog.
           first_depth = select(0.0, surface_hit.t, surface_hit.hit != 0u);
-          first_albedo = clamp(kernel_params.volume_albedo, vec3<f32>(0.0), vec3<f32>(1.0));
+          first_albedo = select(clamp(kernel_params.volume_albedo, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0), grid_scattered);
           first_normal = -ray_dir;
           recorded_features = true;
         }
@@ -1168,17 +1204,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         if (SCENE_HAS_ANALYTIC_LIGHTS && kernel_params.light_count > 0u) {
           smp_seek(&rng, step, SMP_SLOT_VOLUME_ANALYTIC_PICK);
           let light_samp = lgt_sample_analytic_light(scatter_pos, 0xFFFFFFFFu, 0xFFFFFFFFu, smp_next_1d(&rng), smp_next_2d(&rng));
-          int_accumulate_volume_direct_sample(light_samp, scatter_pos, ray_dir, throughput, medium_sigma, in_medium, bounce, transparent_bounces, &sample_radiance);
+          int_accumulate_volume_direct_sample(light_samp, scatter_pos, ray_dir, throughput, medium_sigma, in_medium, phase_anisotropy, bounce, transparent_bounces, &sample_radiance);
         }
         if (SCENE_HAS_ENV_IMPORTANCE && kernel_params.env_width > 0u && kernel_params.env_height > 0u && kernel_params.background_mis_weight > 0.0) {
           smp_seek(&rng, step, SMP_SLOT_VOLUME_ENVIRONMENT);
           let env_samp = lgt_sample_environment(scatter_pos, smp_next_4d(&rng));
-          int_accumulate_volume_direct_sample(env_samp, scatter_pos, ray_dir, throughput, medium_sigma, in_medium, bounce, transparent_bounces, &sample_radiance);
+          int_accumulate_volume_direct_sample(env_samp, scatter_pos, ray_dir, throughput, medium_sigma, in_medium, phase_anisotropy, bounce, transparent_bounces, &sample_radiance);
         }
 
         var phase_pdf = 0.0;
         smp_seek(&rng, step, SMP_SLOT_VOLUME_PHASE);
-        let next_dir = int_sample_henyey_greenstein(ray_dir, kernel_params.volume_anisotropy, smp_next_2d(&rng), &phase_pdf);
+        let next_dir = int_sample_henyey_greenstein(ray_dir, phase_anisotropy, smp_next_2d(&rng), &phase_pdf);
         bounce += 1u;
         volume_bounces += 1u;
         if (bounce >= limit_bounce || volume_bounces >= limit_volume) {
