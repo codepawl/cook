@@ -468,6 +468,8 @@ pub struct NativeSessionResolveOptions {
 #[napi(object)]
 pub struct NativeSessionUpdateOptions {
     pub kernel_params: Uint8Array,
+    /// A new triangle table of any length: a geometry update (the meshes it holds are placed by `instances`).
+    pub triangles: Option<Uint8Array>,
     pub instances: Option<Uint8Array>,
     pub materials: Option<Uint8Array>,
     pub emissive_triangles: Option<Uint8Array>,
@@ -483,6 +485,8 @@ pub struct NativeSessionUpdateReport {
     pub uploaded_tables: Vec<String>,
     /// The TLAS was rebuilt over the kept BLAS because a transform or a ray visibility changed. The pinned wgpu has no refit.
     pub acceleration_rebuilt: bool,
+    /// How many meshes got a new BLAS because their triangles changed (a geometry update).
+    pub changed_meshes: u32,
     /// How many instance records differ from the old table.
     pub changed_instances: u32,
     /// The new tables change what the kernel text is specialized for, so the next render compiles a new pipeline.
@@ -717,16 +721,21 @@ impl NativeCyclesSession {
         self.guard_session_call("resolve", |session| resolve_session_film(session, &options))
     }
 
-    /// Replaces the values of scene tables (materials, lights, emission, instance transforms) without rebuilding the
+    /// Replaces scene tables (materials, lights, emission, instance transforms, and with `triangles` the geometry) without rebuilding the
     /// pipeline or the BLAS. Clears the film.
     #[napi]
     pub fn update(&mut self, options: NativeSessionUpdateOptions) -> Result<NativeSessionUpdateReport> {
         self.guard_session_call("update", |session| {
-            let update = CyclesSceneUpdate { kernel_params: &options.kernel_params, tables: update_tables(&options) };
+            let update = CyclesSceneUpdate {
+                kernel_params: &options.kernel_params,
+                tables: update_tables(&options),
+                triangles: options.triangles.as_deref(),
+            };
             let report = session.update(&update)?;
             Ok(NativeSessionUpdateReport {
                 uploaded_tables: report.uploaded_tables.iter().map(|name| name.to_string()).collect(),
                 acceleration_rebuilt: report.acceleration_rebuilt,
+                changed_meshes: report.changed_meshes,
                 changed_instances: report.changed_instances,
                 kernel_respecialized: report.kernel_respecialized,
                 upload_seconds: report.upload_seconds,

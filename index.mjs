@@ -580,11 +580,10 @@ function validateProgressiveOptions({ accumulate, targetSamples, samples }) {
 // ---- Scene updates ----
 
 const UPDATE_COUNT_NAMES = [
-  'instanceCount', 'triangleCount', 'materialCount', 'emissiveTriangleCount', 'lightCount', 'portalCount', 'lightTreeNodeCount', 'lightTreeEmitterCount', 'textureCount',
+  'instanceCount', 'materialCount', 'emissiveTriangleCount', 'lightCount', 'portalCount', 'lightTreeNodeCount', 'lightTreeEmitterCount', 'textureCount',
 ];
 // Tables a session update cannot change, with what each holds, for the error.
 const UPDATE_FIXED_TABLES = [
-  ['triangles', 'the geometry'],
   ['textureDescriptors', 'the textures'],
   ['textureTexels', 'the textures'],
   ['environmentTexels', 'the environment map'],
@@ -647,10 +646,12 @@ export function planNativeSessionUpdate(currentInput, nextInput) {
   checkUpdateKeepsRecordCounts(currentInput, nextInput);
   checkUpdateKeepsFixedTables(currentInput, nextInput);
   const changedTables = {};
+  const geometryChanged = !sameTableBytes(currentInput.triangles, nextInput.triangles);
+  if (geometryChanged) changedTables.triangles = nextInput.triangles;
   for (const name of UPDATE_VALUE_TABLES) {
     if (!sameTableBytes(currentInput[name], nextInput[name])) changedTables[name] = nextInput[name];
   }
-  if (changedTables.instances !== undefined) {
+  if (changedTables.instances !== undefined && !geometryChanged) {
     checkUpdateKeepsInstanceMeshes(currentInput.instances, nextInput.instances);
   }
   return changedTables;
@@ -735,8 +736,11 @@ export function wrapNativeSession(nativeSession, sessionInput, sessionOptions) {
  * `update(newInput)` takes a FORMAT-v2 input packed from the same scene with other material values, lights, emission or instance
  * transforms and applies it without a new pipeline or BLAS build (the TLAS is rebuilt when a transform changed). It returns
  * `uploadedTables`, `accelerationRebuilt`, `changedInstances`, `kernelRespecialized` and the seconds. It clears the film, and a
- * following frame equals the `traceNative` render of `newInput`. A change of record counts, geometry, textures, the environment
- * map or of the mesh an instance places is refused with an error that says to create a new session.
+ * following frame equals the `traceNative` render of `newInput`. With another `triangles` table (a geometry update) it also
+ * returns `changedMeshes`: only the meshes whose triangles changed get a new BLAS, the others are kept, and the TLAS is rebuilt;
+ * a mesh may have another triangle count. A change of record counts (other than `triangleCount` with its table), textures, the
+ * environment map, the set of meshes, or of the mesh an instance places without a new triangle table is refused with an error
+ * that says to create a new session.
  */
 export function createNativeSession(input, options = {}) {
   const sessionInput = resolveSessionCreation(input, options);

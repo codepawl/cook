@@ -242,8 +242,13 @@ pub(crate) fn check_frame_params_keep_scene_counts(session_kernel_params: &[u8],
 const UPDATABLE_SCENE_WORD_OFFSETS: [usize; 3] = [268, 272, 292];
 
 /// Checks that the kernel parameters of a session update describe a scene of the same shape as the session's: the same
-/// counts, environment and texel pool offsets. The light and emission selection weights may differ.
-pub(crate) fn check_update_params_keep_scene_shape(session_kernel_params: &[u8], update_kernel_params: &[u8]) -> Result<()> {
+/// counts, environment and texel pool offsets. The light and emission selection weights may differ. An update that brings a
+/// new triangle table (`new_triangle_count`) may change the triangle count, which must then equal the table's.
+pub(crate) fn check_update_params_keep_scene_shape(
+    session_kernel_params: &[u8],
+    update_kernel_params: &[u8],
+    new_triangle_count: Option<u32>,
+) -> Result<()> {
     for (name, byte_offset) in SCENE_BOUND_FIELDS {
         if UPDATABLE_SCENE_WORD_OFFSETS.contains(&byte_offset) {
             continue;
@@ -252,6 +257,15 @@ pub(crate) fn check_update_params_keep_scene_shape(session_kernel_params: &[u8],
             return Err(failure(format!(
                 "kernelParams must hold the 336 byte KernelParamsV2 block to read {name} at byte {byte_offset}."
             )));
+        }
+        if let (Some(triangle_count), true) = (new_triangle_count, byte_offset == KP_TRIANGLE_COUNT_BYTE) {
+            let update_word = read_u32_le(update_kernel_params, byte_offset);
+            if update_word != triangle_count {
+                return Err(failure(format!(
+                    "triangleCount is {triangle_count} in the new triangle table but {update_word} in kernelParams (byte {byte_offset}). The two must match; pack both from the same scene."
+                )));
+            }
+            continue;
         }
         let session_word = read_u32_le(session_kernel_params, byte_offset);
         let update_word = read_u32_le(update_kernel_params, byte_offset);
@@ -1048,7 +1062,7 @@ fn ").unwrap_or(sample_body.len());
         for byte_offset in UPDATABLE_SCENE_WORD_OFFSETS {
             let mut reweighted = session_params.clone();
             reweighted[byte_offset..byte_offset + 4].copy_from_slice(&0x4000_0000u32.to_le_bytes());
-            assert!(check_update_params_keep_scene_shape(&session_params, &reweighted).is_ok(), "byte {byte_offset}");
+            assert!(check_update_params_keep_scene_shape(&session_params, &reweighted, None).is_ok(), "byte {byte_offset}");
         }
         for (name, byte_offset) in SCENE_BOUND_FIELDS {
             if UPDATABLE_SCENE_WORD_OFFSETS.contains(&byte_offset) {
@@ -1056,13 +1070,28 @@ fn ").unwrap_or(sample_body.len());
             }
             let mut reshaped = session_params.clone();
             reshaped[byte_offset..byte_offset + 4].copy_from_slice(&0x1234_5678u32.to_le_bytes());
-            let message = check_update_params_keep_scene_shape(&session_params, &reshaped)
+            let message = check_update_params_keep_scene_shape(&session_params, &reshaped, None)
                 .expect_err("a changed scene shape must be refused")
                 .to_string();
             assert!(message.contains(name), "{name}: {message}");
             assert!(message.contains("create a new session"), "{name}: {message}");
         }
-        assert!(check_update_params_keep_scene_shape(&session_params, &session_params[..64]).is_err());
+        assert!(check_update_params_keep_scene_shape(&session_params, &session_params[..64], None).is_err());
+    }
+
+    #[test]
+    fn an_update_with_a_new_triangle_table_may_change_the_triangle_count_to_the_tables_count() {
+        let session_params = make_kp(0, 0.0, 512, 256, 3.0);
+        let mut grown = session_params.clone();
+        grown[KP_TRIANGLE_COUNT_BYTE..KP_TRIANGLE_COUNT_BYTE + 4].copy_from_slice(&777u32.to_le_bytes());
+        assert!(check_update_params_keep_scene_shape(&session_params, &grown, Some(777)).is_ok());
+        let message = check_update_params_keep_scene_shape(&session_params, &grown, Some(500)).unwrap_err().to_string();
+        assert!(message.contains("triangleCount") && message.contains("500") && message.contains("777"), "{message}");
+        let message = check_update_params_keep_scene_shape(&session_params, &grown, None).unwrap_err().to_string();
+        assert!(message.contains("triangleCount") && message.contains("create a new session"), "{message}");
+        let mut other_count = grown.clone();
+        other_count[KP_MATERIAL_COUNT_BYTE..KP_MATERIAL_COUNT_BYTE + 4].copy_from_slice(&9u32.to_le_bytes());
+        assert!(check_update_params_keep_scene_shape(&session_params, &other_count, Some(777)).is_err());
     }
 
     #[test]
@@ -1491,7 +1520,7 @@ fn ").unwrap_or(sample_body.len());
         let frame_message = check_frame_params_keep_scene_counts(&session_params, &other_portals).unwrap_err().to_string();
         assert!(frame_message.contains("portalCount"), "{frame_message}");
         assert!(frame_message.contains("from 2 to 3"), "{frame_message}");
-        let update_message = check_update_params_keep_scene_shape(&session_params, &other_portals).unwrap_err().to_string();
+        let update_message = check_update_params_keep_scene_shape(&session_params, &other_portals, None).unwrap_err().to_string();
         assert!(update_message.contains("portalCount"), "{update_message}");
         assert!(update_message.contains("from 2 to 3"), "{update_message}");
     }
