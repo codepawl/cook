@@ -472,12 +472,12 @@ fn ltr_sample(position: vec3<f32>, normal: vec3<f32>, has_transmission: bool, ra
   var remaining_random = random_number;
   var pick_probability = 1.0;
   var node_index = 0u;
+  var reached_leaf = false;
   for (var level = 0u; level < max_level; level += 1u) {
     let node = light_tree_nodes[node_index];
     if (node.left_child < 0) {
-      let slot = ltr_select_in_leaf(node_index, position, normal, has_transmission, &remaining_random, &pick_probability);
-      *pick_probability_out = pick_probability;
-      return slot;
+      reached_leaf = true;
+      break;
     }
 
     let left_index = u32(node.left_child);
@@ -501,7 +501,12 @@ fn ltr_sample(position: vec3<f32>, normal: vec3<f32>, has_transmission: bool, ra
     pick_probability *= select(left_probability, right_probability, goes_right);
     node_index = select(left_index, right_index, goes_right);
   }
-  return -1;
+  if (!reached_leaf) {
+    return -1;
+  }
+  let slot = ltr_select_in_leaf(node_index, position, normal, has_transmission, &remaining_random, &pick_probability);
+  *pick_probability_out = pick_probability;
+  return slot;
 }
 
 // Probability that `ltr_sample` picks the emitter with this unified index from this shading point.
@@ -514,32 +519,12 @@ fn ltr_pdf(position: vec3<f32>, normal: vec3<f32>, has_transmission: bool, unifi
   let target_emitter = light_tree_emitters[target_slot];
   var pdf = 1.0;
   var node_index = 0u;
+  var reached_leaf = false;
   for (var level = 0u; level < max_level; level += 1u) {
     let node = light_tree_nodes[node_index];
     if (node.left_child < 0) {
-      let emitter_count = min(node.emitter_count_and_kind & LTR_NODE_EMITTER_COUNT_MASK, LTR_MAX_LEAF_EMITTERS);
-      var target_importance = vec2<f32>(0.0);
-      var total_importance = vec2<f32>(0.0);
-      var emitters_with_importance = 0u;
-      for (var emitter_index = 0u; emitter_index < emitter_count; emitter_index += 1u) {
-        let slot = node.right_or_first_emitter + emitter_index;
-        let importance = ltr_emitter_importance(slot, position, normal, has_transmission);
-        if (importance.x > 0.0) {
-          emitters_with_importance += 1u;
-        }
-        if (slot == target_slot) {
-          target_importance = importance;
-        }
-        total_importance += importance;
-      }
-      if (!(target_importance.x > 0.0)) {
-        return 0.0;
-      }
-      var minimum_term = 1.0 / f32(emitters_with_importance);
-      if (total_importance.y > 0.0) {
-        minimum_term = target_importance.y / total_importance.y;
-      }
-      return pdf * 0.5 * (target_importance.x / total_importance.x + minimum_term);
+      reached_leaf = true;
+      break;
     }
 
     let left_index = u32(node.left_child);
@@ -556,7 +541,33 @@ fn ltr_pdf(position: vec3<f32>, normal: vec3<f32>, has_transmission: bool, unifi
     }
     node_index = select(left_index, right_index, goes_right);
   }
-  return 0.0;
+  if (!reached_leaf) {
+    return 0.0;
+  }
+  let node = light_tree_nodes[node_index];
+  let emitter_count = min(node.emitter_count_and_kind & LTR_NODE_EMITTER_COUNT_MASK, LTR_MAX_LEAF_EMITTERS);
+  var target_importance = vec2<f32>(0.0);
+  var total_importance = vec2<f32>(0.0);
+  var emitters_with_importance = 0u;
+  for (var emitter_index = 0u; emitter_index < emitter_count; emitter_index += 1u) {
+    let slot = node.right_or_first_emitter + emitter_index;
+    let importance = ltr_emitter_importance(slot, position, normal, has_transmission);
+    if (importance.x > 0.0) {
+      emitters_with_importance += 1u;
+    }
+    if (slot == target_slot) {
+      target_importance = importance;
+    }
+    total_importance += importance;
+  }
+  if (!(target_importance.x > 0.0)) {
+    return 0.0;
+  }
+  var minimum_term = 1.0 / f32(emitters_with_importance);
+  if (total_importance.y > 0.0) {
+    minimum_term = target_importance.y / total_importance.y;
+  }
+  return pdf * 0.5 * (target_importance.x / total_importance.x + minimum_term);
 }
 
 // ---- Test probe (`KERNEL_FLAG_LIGHT_TREE_PROBE`) ------------------------------------------------------------------------------
