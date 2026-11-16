@@ -133,19 +133,21 @@ function describeScene({ caster, lightPosition, lightRadius, lightEmission, cast
 
 /**
  * The input of one scene. `name` is `ball` (crucible#1715's repro: a ball of radius 0.5, a light of radius 0.3 and emission 40 at 3.5 m)
- * or `prism` (a prism of side 0.3 and length 0.5 under a sphere of radius 0.09 at [-2.6, 1.15, 0]). `opaqueCaster` swaps the glass for
+ * (`ballHeight` lifts it and `lowView` looks at the floor under it from the side) or `prism` (a prism of side 0.3 and length 0.5 under a sphere of radius 0.09 at [-2.6, 1.15, 0]). `opaqueCaster` swaps the glass for
  * a grey material, the reference of the shadow.
  */
-export function buildCausticInput(name, { width, height, samples, caustics = false, opaqueCaster = false, bounces = 12, seed = 1 }) {
+export function buildCausticInput(name, { width, height, samples, caustics = false, opaqueCaster = false, bounces = 12, seed = 1, ballHeight = 0.5, lowView = false }) {
   let description;
   if (name === 'ball') {
     description = describeScene({
       caster: sphereGeometry(),
-      casterMatrix: translationMatrix([0, 0.5, 0], [0.5, 0.5, 0.5]),
+      casterMatrix: translationMatrix([0, ballHeight, 0], [0.5, 0.5, 0.5]),
       lightPosition: [0, 3.5, 0],
       lightRadius: 0.3,
       lightEmission: 40,
-      camera: pinholeCamera({ eye: [0, 2.2, 3.2], target: [0, 0.2, 0], fieldOfViewDegrees: 40, width, height }),
+      camera: lowView
+        ? pinholeCamera({ eye: [0, 0.5, 3.0], target: [0, 0.1, 0], fieldOfViewDegrees: 30, width, height })
+        : pinholeCamera({ eye: [0, 2.2, 3.2], target: [0, 0.2, 0], fieldOfViewDegrees: 40, width, height }),
       caustics,
       opaqueCaster,
     });

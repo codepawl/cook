@@ -15,21 +15,32 @@ function skipReason() {
 }
 const skip = skipReason();
 
-const WIDTH = 64;
-const HEIGHT = 36;
-const SAMPLES = 32;
+const WIDTH = 80;
+const HEIGHT = 45;
+const SAMPLES = 48;
+const BLOCK = 4;
 const VISIBILITY_WORD = 29;
 
 function render(input) {
   return traceNative(input, { kernel: 'cycles', width: WIDTH, height: HEIGHT, samples: SAMPLES, denoise: 'none' });
 }
 
-function meanOfRgb(result) {
-  let sum = 0;
-  for (let pixel = 0; pixel < WIDTH * HEIGHT; pixel++) {
-    sum += result.rgba[pixel * 4] + result.rgba[pixel * 4 + 1] + result.rgba[pixel * 4 + 2];
+// The brightest BLOCK x BLOCK block of the picture: the caustic spot is a few times brighter than the lit floor around it.
+function brightestBlock(result) {
+  let brightest = 0;
+  for (let top = 0; top + BLOCK <= HEIGHT; top += BLOCK) {
+    for (let left = 0; left + BLOCK <= WIDTH; left += BLOCK) {
+      let sum = 0;
+      for (let row = top; row < top + BLOCK; row++) {
+        for (let column = left; column < left + BLOCK; column++) {
+          const offset = (row * WIDTH + column) * 4;
+          sum += result.rgba[offset] + result.rgba[offset + 1] + result.rgba[offset + 2];
+        }
+      }
+      brightest = Math.max(brightest, sum / (BLOCK * BLOCK * 3));
+    }
   }
-  return sum / (WIDTH * HEIGHT * 3);
+  return brightest;
 }
 
 test('a caster without a receiver renders the same bytes as a scene without the bits', { skip }, () => {
@@ -42,9 +53,10 @@ test('a caster without a receiver renders the same bytes as a scene without the 
   assert.ok(Buffer.from(first.rgba.buffer, first.rgba.byteOffset, first.rgba.byteLength).equals(Buffer.from(second.rgba.buffer, second.rgba.byteOffset, second.rgba.byteLength)));
 });
 
-test('light reaches the floor through a glass ball once the ball is a caster and the floor a receiver', { skip }, () => {
-  const without = meanOfRgb(render(buildCausticInput('ball', { width: WIDTH, height: HEIGHT, samples: SAMPLES })));
-  const withCaustics = meanOfRgb(render(buildCausticInput('ball', { width: WIDTH, height: HEIGHT, samples: SAMPLES, caustics: true })));
+test('a raised glass ball throws a caustic spot on the floor once it is a caster and the floor a receiver', { skip }, () => {
+  const scene = { width: WIDTH, height: HEIGHT, samples: SAMPLES, ballHeight: 1.0, lowView: true };
+  const without = brightestBlock(render(buildCausticInput('ball', scene)));
+  const withCaustics = brightestBlock(render(buildCausticInput('ball', { ...scene, caustics: true })));
   assert.ok(Number.isFinite(withCaustics));
-  assert.ok(withCaustics > without * 1.01, `mean ${withCaustics} with the estimator, ${without} without`);
+  assert.ok(withCaustics > without * 1.5, );
 });
