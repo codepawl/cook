@@ -37,10 +37,10 @@ jobs:
           key: cargo-lavapipe-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
       - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
       - run: node build.mjs
-      - name: Caustic tests on the GPU path
-        run: node --test tests/gpu/caustics.test.mjs
       - name: Render the caustic scenes
         run: node tools/measure-caustics.mjs caustics-out tools/caustics-ci.json
+      - name: Caustic tests on the GPU path
+        run: node --test tests/gpu/caustics.test.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
