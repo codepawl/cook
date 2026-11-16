@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        copy: [1, 2, 3, 4, 5, 6]
+        copy: [1, 2, 3]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -24,7 +24,7 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-lavapipe-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers vulkan-tools vulkan-validationlayers
       - run: node build.mjs
       - name: CPU
         run: |
@@ -33,11 +33,19 @@ jobs:
           vulkaninfo --summary 2>/dev/null | grep -i -E "deviceName|driverInfo"
       - name: Default
         run: node tools/probe-lavapipe-42.mjs default
-      - name: 256-bit vectors
+      - name: GPU-assisted validation of the flat pick
         env:
-          LP_NATIVE_VECTOR_WIDTH: '256'
-        run: node tools/probe-lavapipe-42.mjs width256
-      - name: SSE4.1 only
-        env:
-          GALLIUM_OVERRIDE_CPU_CAPS: sse4.1
-        run: node tools/probe-lavapipe-42.mjs sse41
+          VK_LOADER_LAYERS_ENABLE: '*validation'
+          VK_KHRONOS_VALIDATION_DEBUG_ACTION: VK_DBG_LAYER_ACTION_LOG_MSG
+          VK_KHRONOS_VALIDATION_REPORT_FLAGS: error,warn
+          VK_KHRONOS_VALIDATION_LOG_FILENAME: stdout
+          VK_KHRONOS_VALIDATION_VALIDATE_GPU_BASED: GPU_BASED_GPU_ASSISTED
+          VK_KHRONOS_VALIDATION_GPUAV_SAFE_MODE: 'true'
+          PROBE_ONLY: tree,uniform-bsdf,uniform
+          PROBE_WIDTH: '16'
+          PROBE_HEIGHT: '12'
+          PROBE_SAMPLES: '4'
+        run: |
+          set +e
+          node tools/probe-lavapipe-42.mjs gpuav 2>&1 | grep -v -e "VUID-vkDestroyDevice-device-05137" -e "VUID-StandaloneSpirv-None-10684" | head -c 60000
+          echo "exit ${PIPESTATUS[0]}"

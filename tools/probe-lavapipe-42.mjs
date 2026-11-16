@@ -77,8 +77,10 @@ function brightCount(rgba, limit) {
   return count;
 }
 
-const width = 48;
-const height = 32;
+const width = Number(process.env.PROBE_WIDTH ?? 48);
+const height = Number(process.env.PROBE_HEIGHT ?? 32);
+const onlyVariants = process.env.PROBE_ONLY ? process.env.PROBE_ONLY.split(',') : null;
+const sampleCount = Number(process.env.PROBE_SAMPLES ?? 256);
 const label = process.argv[2] ?? 'default';
 const variants = [
   { name: 'tree', scene: { withEmitters: true, withPoint: true }, options: { lightSampling: 'tree' } },
@@ -91,8 +93,11 @@ const variants = [
 ];
 let treeMean = null;
 for (const variant of variants) {
+  if (onlyVariants !== null && !onlyVariants.includes(variant.name)) {
+    continue;
+  }
   const camera = createCamera(width, height);
-  const options = { width, height, samples: 256, samplesPerDispatch: 32, seed: 5, kernel: 'cycles', ...variant.options };
+  const options = { width, height, samples: sampleCount, samplesPerDispatch: Math.min(32, sampleCount), seed: 5, kernel: 'cycles', ...variant.options };
   const input = buildNativeInputV2(buildScene(variant.scene), camera, options);
   try {
     const result = traceNative(input, options);
