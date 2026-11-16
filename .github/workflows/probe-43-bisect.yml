@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [base, sample-off-pdf-off, sample-off, pdf-off, one-level, child-importance-const, emitter-importance-const, left-probability-const, leaf-first-slot]
+        variant: [so-pdf-after-light-to-tree, so-pdf-after-emitter-read, so-pdf-node-read, so-all-importance-const, so-profiles-invisible, so-profile-importance-const]
     defaults:
       run:
         shell: bash
