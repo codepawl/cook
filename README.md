@@ -49,7 +49,7 @@ You need Node 20.19 or newer and the driver of your GPU. On Windows x64 and Linu
 2. Install a released version of Cook:
 
    ```sh
-   npm install github:codepawl/cook#v0.1.1
+   npm install github:codepawl/cook#v0.2.0
    ```
 
    If npm says `Fetching packages of type "git" have been disabled`, add `--allow-git=all` to the command. npm 12 needs it for a package from GitHub.
@@ -104,7 +104,7 @@ On Linux:
 
 Then, on both systems:
 
-1. Install Cook. Leave out `#v0.1.1` to get the newest commit.
+1. Install Cook. Leave out `#v0.2.0` to get the newest commit.
 
    ```sh
    npm install github:codepawl/cook
