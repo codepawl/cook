@@ -55,12 +55,18 @@ pub struct AddonBuildInfo {
     pub version: String,
     /// `PACK_REVISION` of pack-input-v2.mjs when the addon was built: the kernel's input layout revision.
     pub pack_revision: u32,
+    /// Size in bytes of the KernelParamsV2 block the kernel reads; the JS package must write blocks of the same size.
+    pub kernel_params_bytes: u32,
 }
 
 /// What this addon was built from. Addons built before this export existed lack it; index.mjs treats that as unknown.
 #[napi]
 pub fn addon_build_info() -> AddonBuildInfo {
-    AddonBuildInfo { version: ADDON_VERSION.to_string(), pack_revision: ADDON_PACK_REVISION }
+    AddonBuildInfo {
+        version: ADDON_VERSION.to_string(),
+        pack_revision: ADDON_PACK_REVISION,
+        kernel_params_bytes: crate::host::session::KERNEL_PARAMS_V2_BYTES as u32,
+    }
 }
 
 fn panic_message(payload: &(dyn Any + Send)) -> String {

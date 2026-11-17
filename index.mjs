@@ -421,8 +421,6 @@ export function readAdapterCapacity() {
   return addon.adapterCapacity();
 }
 
-const warnedAddonPaths = new Set();
-
 /** The version the package.json next to this file declares: the addon built from this checkout reports the same one. */
 function readPackageVersion() {
   const packageJsonPath = join(PACKAGE_DIRECTORY, 'package.json');
@@ -430,12 +428,17 @@ function readPackageVersion() {
 }
 
 /**
- * Compares what an addon reports about its build (`addonBuildInfo()`) with this package. Returns
- * `{ status: 'match' }`, `{ status: 'unknown' }` for an addon that lacks the export (prebuilt v0.1.0 and v0.1.1), or
- * `{ status: 'mismatch', differences: [...] }` where each difference says what differs.
+ * Compares what an addon reports about its build (`addonBuildInfo()`) with this package. Returns `{ status: 'match' }`, or
+ * `{ status: 'mismatch', differences: [...] }` where each difference says what differs. An addon that lacks the export
+ * (prebuilt v0.1.0 and v0.1.1) or the KernelParamsV2 size is a mismatch: it is older than this package.
  */
-export function compareAddonBuildInfo(addonBuildInfo, expected = { version: readPackageVersion(), packRevision: PACK_REVISION }) {
-  if (typeof addonBuildInfo !== 'function') return { status: 'unknown' };
+export function compareAddonBuildInfo(
+  addonBuildInfo,
+  expected = { version: readPackageVersion(), packRevision: PACK_REVISION, kernelParamsBytes: STRUCT_STRIDES_V2.kernelParams }
+) {
+  if (typeof addonBuildInfo !== 'function') {
+    return { status: 'mismatch', differences: ['the addon does not export addonBuildInfo, so it was built before this package'] };
+  }
   const reported = addonBuildInfo();
   const differences = [];
   if (reported.version !== expected.version) {
@@ -444,22 +447,20 @@ export function compareAddonBuildInfo(addonBuildInfo, expected = { version: read
   if (reported.packRevision !== expected.packRevision) {
     differences.push(`the addon reads pack revision ${reported.packRevision} and the package writes pack revision ${expected.packRevision}`);
   }
+  if (reported.kernelParamsBytes !== expected.kernelParamsBytes) {
+    differences.push(
+      `the addon reads KernelParamsV2 blocks of ${reported.kernelParamsBytes ?? 'an unreported number of'} bytes and the package writes ${expected.kernelParamsBytes} bytes`
+    );
+  }
   return differences.length === 0 ? { status: 'match' } : { status: 'mismatch', differences };
 }
 
-/** Throws when the addon was built from other sources than this package; warns once when it cannot tell. */
+/** Throws when the addon was built from other sources than this package, before any trace can fail deep inside the kernel. */
 export function verifyAddonBuildInfo(addon, addonPath, expected) {
   const result = compareAddonBuildInfo(addon.addonBuildInfo, expected);
   if (result.status === 'mismatch') {
     throw new Error(
-      `The native addon at ${JSON.stringify(addonPath)} does not match this package: ${result.differences.join('; ')}. Run \`npx cook fetch-addon\` to download the addon of this version, or \`npm run build\` to compile it from these sources.`
-    );
-  }
-  if (result.status === 'unknown' && !warnedAddonPaths.has(addonPath)) {
-    warnedAddonPaths.add(addonPath);
-    process.emitWarning(
-      `The native addon at ${JSON.stringify(addonPath)} predates the version check, so Cook cannot tell whether it matches this package. If renders fail oddly, run \`npx cook fetch-addon\` or \`npm run build\`.`,
-      'CookAddonWarning'
+      `The Cook addon at ${JSON.stringify(addonPath)} does not match this package: ${result.differences.join('; ')}. Run \`npx cook fetch-addon\` after a release, or rebuild with \`npm run build\` (node build.mjs).`
     );
   }
 }

@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { PACK_REVISION } from '../pack-input-v2.mjs';
+import { PACK_REVISION, STRUCT_STRIDES_V2 } from '../pack-input-v2.mjs';
 
 const repositoryDirectory = join(dirname(fileURLToPath(import.meta.url)), '..');
 const addonPath = resolve(process.argv[2] ?? join(repositoryDirectory, 'build', 'render-native.node'));
@@ -19,5 +19,5 @@ assert.equal(
   'function',
   `${addonPath} does not export addonBuildInfo; build it from the current sources.`,
 );
-assert.deepEqual(addonModule.exports.addonBuildInfo(), { version: packageVersion, packRevision: PACK_REVISION });
+assert.deepEqual(addonModule.exports.addonBuildInfo(), { version: packageVersion, packRevision: PACK_REVISION, kernelParamsBytes: STRUCT_STRIDES_V2.kernelParams });
 console.log(`addonBuildInfo matches package.json (${packageVersion}) and PACK_REVISION (${PACK_REVISION})`);
