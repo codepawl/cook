@@ -14,6 +14,7 @@ use crate::host::accel::{
     INSTANCE_RECORD_BYTES, TRIANGLE_FLOATS, TRIANGLE_RECORD_BYTES,
 };
 use crate::host::dispatch::{next_tile, DispatchPlanner, TileBudgetPlanner, DISPATCH_BUDGET_SECONDS};
+use crate::host::disk_pipeline_cache::{CacheEnvironment, DiskPipelineCache, PipelineCacheStatus};
 use crate::host::device::{check_buffer_sizes_fit, failure, layout_entry, open_device, run_in_error_scopes, storage_buffer, storage_entry};
 use crate::host::film::{image_accumulation_bytes, read_accumulation};
 use crate::host::textures::upload_scene_buffers;
@@ -82,6 +83,8 @@ struct CachedDevice {
     cycles_bind_group_layout: wgpu::BindGroupLayout,
     /// Compiled Cycles compute pipelines keyed by entry point and specialized source hash.
     cycles_pipelines: BoundedCache<wgpu::ComputePipeline>,
+    /// The driver's pipeline cache and its file, so a new process skips the compile of a kernel variant an earlier one made.
+    disk_cache: std::result::Result<Arc<DiskPipelineCache>, PipelineCacheStatus>,
 }
 
 static DEVICE_CACHE: OnceLock<Mutex<Option<CachedDevice>>> = OnceLock::new();
@@ -182,6 +185,7 @@ pub(crate) fn get_cached_device() -> Result<(wgpu::Device, wgpu::Queue, String, 
         });
         let cycles_bind_group_layout = create_cycles_bind_group_layout(&device);
         let has_ray_query = device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+        let disk_cache = DiskPipelineCache::open(&device, &adapter_info, &CacheEnvironment::from_process()).map(Arc::new);
         *guard = Some(CachedDevice {
             device,
             queue,
@@ -194,6 +198,7 @@ pub(crate) fn get_cached_device() -> Result<(wgpu::Device, wgpu::Queue, String, 
             lut_buffer,
             cycles_bind_group_layout,
             cycles_pipelines: BoundedCache::new(MAX_CACHED_PIPELINES),
+            disk_cache,
         });
     }
     let cached = guard.as_ref().unwrap();
@@ -220,6 +225,7 @@ fn store_first_error(slot: &Mutex<Option<String>>, message: &str) {
 
 /// What the device callbacks fill in: the lost flag, the lost message and the first uncaptured error.
 struct CachedDeviceReports {
+    pipeline_cache: &'static str,
     device_lost: Arc<AtomicBool>,
     device_error: Arc<Mutex<String>>,
     uncaptured_error: Arc<Mutex<Option<String>>>,
@@ -229,6 +235,10 @@ fn cached_device_reports() -> Result<CachedDeviceReports> {
     let guard = lock_device_cache();
     match guard.as_ref() {
         Some(cached) => Ok(CachedDeviceReports {
+            pipeline_cache: match &cached.disk_cache {
+                Ok(disk) => disk.status.as_report(),
+                Err(status) => status.as_report(),
+            },
             device_lost: Arc::clone(&cached.device_lost),
             device_error: Arc::clone(&cached.device_error),
             uncaptured_error: Arc::clone(&cached.uncaptured_error),
@@ -255,17 +265,27 @@ pub(crate) fn get_or_compile_cycles_pipeline_on(
     specialized_source: String,
 ) -> Result<wgpu::ComputePipeline> {
     let key = pipeline_key(entry_point, &specialized_source);
-    {
+    let disk_cache = {
         let guard = lock_device_cache();
         let cached = guard.as_ref().ok_or_else(cache_was_reset_failure)?;
         check_same_device(cached, expected_device)?;
         if let Some(existing) = cached.cycles_pipelines.get(&key) {
             return Ok(existing);
         }
-    }
+        cached.disk_cache.as_ref().ok().map(Arc::clone)
+    };
     let compiled = with_cycles_cache_on(expected_device, |device, _queue, layout, _lut| {
-        compile_compute_pipeline(device, specialized_source, entry_point, layout)
+        compile_compute_pipeline_with_cache(
+            device,
+            specialized_source,
+            entry_point,
+            layout,
+            disk_cache.as_ref().map(|disk| &disk.cache),
+        )
     })??;
+    if let Some(disk) = &disk_cache {
+        disk.store();
+    }
     let mut guard = lock_device_cache();
     // Another thread may have replaced a lost device while this one compiled; a pipeline of the old device must not enter the new cache.
     let cached = guard.as_mut().ok_or_else(cache_was_reset_failure)?;
@@ -316,6 +336,8 @@ pub(crate) struct CyclesDeviceContext {
     pub(crate) adapter_name: String,
     pub(crate) backend_name: String,
     pub(crate) features: String,
+    /// What the on-disk pipeline cache did when the device opened: "off", "unsupported", "cold" or "warm".
+    pub(crate) pipeline_cache: &'static str,
     pub(crate) device_lost: Arc<AtomicBool>,
     pub(crate) device_error: Arc<Mutex<String>>,
     pub(crate) uncaptured_error: Arc<Mutex<Option<String>>>,
@@ -330,6 +352,7 @@ pub(crate) fn get_cycles_device_context() -> Result<CyclesDeviceContext> {
         adapter_name,
         backend_name,
         features,
+        pipeline_cache: reports.pipeline_cache,
         device_lost: reports.device_lost,
         device_error: reports.device_error,
         uncaptured_error: reports.uncaptured_error,
@@ -468,6 +491,17 @@ pub(crate) fn compile_compute_pipeline(
     entry_point: &str,
     bind_group_layout: &wgpu::BindGroupLayout,
 ) -> Result<wgpu::ComputePipeline> {
+    compile_compute_pipeline_with_cache(device, shader_source, entry_point, bind_group_layout, None)
+}
+
+/// As `compile_compute_pipeline`, with the driver's pipeline cache: a kernel the cache holds skips the driver compile.
+pub(crate) fn compile_compute_pipeline_with_cache(
+    device: &wgpu::Device,
+    shader_source: String,
+    entry_point: &str,
+    bind_group_layout: &wgpu::BindGroupLayout,
+    pipeline_cache: Option<&wgpu::PipelineCache>,
+) -> Result<wgpu::ComputePipeline> {
     let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("path tracer"),
@@ -484,7 +518,7 @@ pub(crate) fn compile_compute_pipeline(
         module: &module,
         entry_point: Some(entry_point),
         compilation_options: Default::default(),
-        cache: None,
+        cache: pipeline_cache,
     });
     if let Some(validation_error) = pollster::block_on(error_scope.pop()) {
         return Err(failure(format!("Could not compile the native kernel: {validation_error}")));

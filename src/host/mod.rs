@@ -3,6 +3,7 @@ pub(crate) mod capacity;
 pub(crate) mod denoise;
 pub(crate) mod dispatch;
 pub(crate) mod device;
+pub(crate) mod disk_pipeline_cache;
 pub(crate) mod film;
 pub(crate) mod oidn;
 pub(crate) mod cycles_session;
