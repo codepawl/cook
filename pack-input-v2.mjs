@@ -97,15 +97,25 @@ const LIGHT_FLAG_SOFT_FALLOFF = 32;
 const LIGHT_BOUNCE_LIMIT_SHIFT = 8;
 const MAXIMUM_LIGHT_BOUNCE_LIMIT = 254;
 
-function lightBounceLimitFlags(light, lightsField) {
-  if (light.maxBounces === undefined) {
+/** The limit of `light.maxBounces` plus one, or 0 for a light without one. The v1 packers store this code too (sun: `sunDirection.w`, other lights: the last float of their last texel). */
+export function lightBounceLimitCode(light, lightsField) {
+  if (light?.maxBounces === undefined) {
     return 0;
   }
   const limit = light.maxBounces;
   if (!Number.isInteger(limit) || limit < 0 || limit > MAXIMUM_LIGHT_BOUNCE_LIMIT) {
     throw new RangeError(`lights.${lightsField}.maxBounces must be a whole number from 0 to ${MAXIMUM_LIGHT_BOUNCE_LIMIT}, got ${JSON.stringify(limit)}. Leave it out for no limit beyond the scene's bounces.`);
   }
-  return (limit + 1) << LIGHT_BOUNCE_LIMIT_SHIFT;
+  return limit + 1;
+}
+
+function lightBounceLimitFlags(light, lightsField) {
+  return lightBounceLimitCode(light, lightsField) << LIGHT_BOUNCE_LIMIT_SHIFT;
+}
+
+// The `maxBounces` a v1 input stored as a code, for the lights rebuilt from it.
+function reconstructedBounceLimit(code) {
+  return code > 0 ? { maxBounces: Math.round(code) - 1 } : {};
 }
 
 const MATERIAL_FLAG_MULTISCATTER_GGX = 1;
@@ -3769,6 +3779,7 @@ export function upgradeNativeInputV1ToV2(v1Input, options = {}, carriedFields = 
       direction: [paramF32[16], paramF32[17], paramF32[18]],
       color: [paramF32[20], paramF32[21], paramF32[22]],
       angularRadius: resolveReconstructedSunRadius(Math.acos(cosSun)),
+      ...reconstructedBounceLimit(paramF32[19]),
     };
   }
   const lightFloats = v1Input.lights;
@@ -3789,6 +3800,7 @@ export function upgradeNativeInputV1ToV2(v1Input, options = {}, carriedFields = 
         height: lightFloats[b + 15],
         along: [lightFloats[b + 16], lightFloats[b + 17], lightFloats[b + 18]],
         intensity: lightFloats[b + 20],
+        ...reconstructedBounceLimit(lightFloats[b + 23]),
       });
     } else if (type === 1) {
       reconstructedLights.spots.push({
@@ -3802,6 +3814,7 @@ export function upgradeNativeInputV1ToV2(v1Input, options = {}, carriedFields = 
         intensity: lightFloats[b + 20],
         range: lightFloats[b + 21],
         softFalloff: lightFloats[b + 22] === 1,
+        ...reconstructedBounceLimit(lightFloats[b + 23]),
       });
     } else {
       reconstructedLights.points.push({
@@ -3812,6 +3825,7 @@ export function upgradeNativeInputV1ToV2(v1Input, options = {}, carriedFields = 
         intensity: lightFloats[b + 20],
         range: lightFloats[b + 21],
         softFalloff: lightFloats[b + 22] === 1,
+        ...reconstructedBounceLimit(lightFloats[b + 23]),
       });
     }
   }

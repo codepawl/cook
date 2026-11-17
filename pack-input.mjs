@@ -1,6 +1,6 @@
 // Packs a trace scene into the tables the native kernel reads. It imports nothing from Node, so the job page can run it too.
 // 16 vectors: the 12 of the camera, lights and seed, the fog box and medium, and the subsurface table's first vector index.
-import { PACK_REVISION, SUN_DEFAULT_HALF_ANGLE, resolveVolumeAlbedo } from './pack-input-v2.mjs';
+import { PACK_REVISION, SUN_DEFAULT_HALF_ANGLE, lightBounceLimitCode, resolveVolumeAlbedo } from './pack-input-v2.mjs';
 
 const PARAMETER_BYTES = 16 * 16;
 const DEFAULT_FIREFLY_CLAMP = 20;
@@ -56,7 +56,8 @@ function writeParameters(scene, camera, options, lightCount, atlasWidth, subsurf
   floats.set([...camera.right, 0], 8);
   floats.set([...camera.above, 0], 12);
   writeThinLens(floats, camera);
-  floats.set([...(sun?.direction ?? [0, 1, 0]), 0], 16);
+  // The fourth float is the sun's own bounce limit as `limit + 1` (0: none), which the "cycles" kernel reads after the upgrade to v2; the legacy kernel ignores it.
+  floats.set([...(sun?.direction ?? [0, 1, 0]), lightBounceLimitCode(sun, 'sun')], 16);
   floats.set([...(sun?.color ?? [0, 0, 0]), sunConeCosine(sun)], 20);
   floats.set([environment?.width ?? 1, environment?.height ?? 1, environment?.intensity ?? 1, environment?.total ?? 1], 24);
   floats.set([environment?.cosine ?? 1, environment?.sine ?? 0, scene.surfaceOffset, scene.farDistance], 28);
