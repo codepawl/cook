@@ -93,6 +93,30 @@ const LIGHT_FLAG_CAMERA_VISIBLE = 4;
 const LIGHT_FLAG_PORTAL = 8;
 const LIGHT_FLAG_NORMALIZE = 16;
 const LIGHT_FLAG_SOFT_FALLOFF = 32;
+// Bits 8..15 of `LightRecord.flags` hold a light's own bounce limit as `limit + 1`; 0 means the scene limit alone (FORMAT-v2.md section 6).
+const LIGHT_BOUNCE_LIMIT_SHIFT = 8;
+const MAXIMUM_LIGHT_BOUNCE_LIMIT = 254;
+
+/** The limit of `light.maxBounces` plus one, or 0 for a light without one. The v1 packers store this code too (sun: `sunDirection.w`, other lights: the last float of their last texel). */
+export function lightBounceLimitCode(light, lightsField) {
+  if (light?.maxBounces === undefined) {
+    return 0;
+  }
+  const limit = light.maxBounces;
+  if (!Number.isInteger(limit) || limit < 0 || limit > MAXIMUM_LIGHT_BOUNCE_LIMIT) {
+    throw new RangeError(`lights.${lightsField}.maxBounces must be a whole number from 0 to ${MAXIMUM_LIGHT_BOUNCE_LIMIT}, got ${JSON.stringify(limit)}. Leave it out for no limit beyond the scene's bounces.`);
+  }
+  return limit + 1;
+}
+
+function lightBounceLimitFlags(light, lightsField) {
+  return lightBounceLimitCode(light, lightsField) << LIGHT_BOUNCE_LIMIT_SHIFT;
+}
+
+// The `maxBounces` a v1 input stored as a code, for the lights rebuilt from it.
+function reconstructedBounceLimit(code) {
+  return code > 0 ? { maxBounces: Math.round(code) - 1 } : {};
+}
 
 const MATERIAL_FLAG_MULTISCATTER_GGX = 1;
 const MATERIAL_FLAG_THIN_WALLED = 2;
@@ -1385,6 +1409,7 @@ function buildAnalyticLightEntries(lightsSection = {}) {
       if (sun.cameraVisible === true) {
         flags |= LIGHT_FLAG_CAMERA_VISIBLE;
       }
+      flags |= lightBounceLimitFlags(sun, 'sun');
       const masks = lightBitMaskWords(sun.bit, sun.lightGroupMaskLo, sun.lightGroupMaskHi);
       const weight = Math.max(1e-6, Math.PI * luminance(sunColor));
       records.push({
@@ -1433,6 +1458,7 @@ function buildAnalyticLightEntries(lightsSection = {}) {
     if (point.cameraVisible === true) {
       flags |= LIGHT_FLAG_CAMERA_VISIBLE;
     }
+    flags |= lightBounceLimitFlags(point, 'points[]');
     const masks = lightBitMaskWords(point.bit, point.lightGroupMaskLo, point.lightGroupMaskHi);
     const maxDistance = point.range > 0 ? Number(point.range) : 1e30;
     const weight = Math.max(1e-6, 4 * Math.PI * luminance(color) * intensity);
@@ -1497,6 +1523,7 @@ function buildAnalyticLightEntries(lightsSection = {}) {
     if (spot.cameraVisible === true) {
       flags |= LIGHT_FLAG_CAMERA_VISIBLE;
     }
+    flags |= lightBounceLimitFlags(spot, 'spots[]');
     const masks = lightBitMaskWords(spot.bit, spot.lightGroupMaskLo, spot.lightGroupMaskHi);
     const maxDistance = spot.range > 0 ? Number(spot.range) : 1e30;
     const coneSolidAngle = Math.max(1e-4, 2 * Math.PI * Math.max(0, 1 - cosHalfAngle));
@@ -1575,6 +1602,7 @@ function buildAnalyticLightEntries(lightsSection = {}) {
     if (area.cameraVisible === true) {
       flags |= LIGHT_FLAG_CAMERA_VISIBLE;
     }
+    flags |= lightBounceLimitFlags(area, 'areas[]');
     const masks = lightBitMaskWords(area.bit, area.lightGroupMaskLo, area.lightGroupMaskHi);
     const weight = Math.max(1e-6, Math.PI * luminance(color) * intensity);
     records.push({
@@ -3751,6 +3779,7 @@ export function upgradeNativeInputV1ToV2(v1Input, options = {}, carriedFields = 
       direction: [paramF32[16], paramF32[17], paramF32[18]],
       color: [paramF32[20], paramF32[21], paramF32[22]],
       angularRadius: resolveReconstructedSunRadius(Math.acos(cosSun)),
+      ...reconstructedBounceLimit(paramF32[19]),
     };
   }
   const lightFloats = v1Input.lights;
@@ -3771,6 +3800,7 @@ export function upgradeNativeInputV1ToV2(v1Input, options = {}, carriedFields = 
         height: lightFloats[b + 15],
         along: [lightFloats[b + 16], lightFloats[b + 17], lightFloats[b + 18]],
         intensity: lightFloats[b + 20],
+        ...reconstructedBounceLimit(lightFloats[b + 23]),
       });
     } else if (type === 1) {
       reconstructedLights.spots.push({
@@ -3784,6 +3814,7 @@ export function upgradeNativeInputV1ToV2(v1Input, options = {}, carriedFields = 
         intensity: lightFloats[b + 20],
         range: lightFloats[b + 21],
         softFalloff: lightFloats[b + 22] === 1,
+        ...reconstructedBounceLimit(lightFloats[b + 23]),
       });
     } else {
       reconstructedLights.points.push({
@@ -3794,6 +3825,7 @@ export function upgradeNativeInputV1ToV2(v1Input, options = {}, carriedFields = 
         intensity: lightFloats[b + 20],
         range: lightFloats[b + 21],
         softFalloff: lightFloats[b + 22] === 1,
+        ...reconstructedBounceLimit(lightFloats[b + 23]),
       });
     }
   }

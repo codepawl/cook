@@ -95,6 +95,9 @@ const LIGHT_FLAG_PORTAL: u32 = 8u;
 const LIGHT_FLAG_NORMALIZE: u32 = 16u;
 // A point or spot light with a radius is an oriented disk facing the shading point (Blender's `use_soft_falloff`), not a sphere.
 const LIGHT_FLAG_SOFT_FALLOFF: u32 = 32u;
+// Bits 8..15 of `LightRecord.flags`: the light's own bounce limit as `limit + 1`, `0` for none (FORMAT-v2.md section 6).
+const LIGHT_BOUNCE_LIMIT_SHIFT: u32 = 8u;
+const LIGHT_BOUNCE_LIMIT_MASK: u32 = 255u;
 
 // `MaterialRecord.flags` bits.
 const MATERIAL_FLAG_MULTISCATTER_GGX: u32 = 1u;
