@@ -11,6 +11,7 @@ import { createNativeSession, resolveSessionFrame, traceNative } from '../index.
 import { decodePackFile, encodePackFile } from '../pack-file.mjs';
 import { buildNativeInputV2, createTextureCollector, packMaterialRecordV2, validatePackOptions } from '../pack-input-v2.mjs';
 import { buildRoomInput } from '../tools/make-fixture-pack.mjs';
+import { MATCHING_ADDON_BUILD_INFO_SOURCE } from './support/fake-addon.mjs';
 
 const PACKAGE_DIRECTORY = fileURLToPath(new URL('..', import.meta.url));
 const CLI_PATH = join(PACKAGE_DIRECTORY, 'bin', 'cook.mjs');
@@ -185,7 +186,7 @@ function partialFilesOf(outputName) {
 
 function writeFakeAddon(name, traceBody) {
   const addonPath = pathInWork(name);
-  writeFileSync(addonPath, `module.exports = { traceSceneCycles(input, options) { ${traceBody} } };`);
+  writeFileSync(addonPath, `module.exports = { ${MATCHING_ADDON_BUILD_INFO_SOURCE}, traceSceneCycles(input, options) { ${traceBody} } };`);
   return addonPath;
 }
 

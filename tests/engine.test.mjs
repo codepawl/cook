@@ -16,6 +16,7 @@ import {
 import { PACK_REVISION, findNativeAddon, resolveNativeKernel, traceNative } from '../index.mjs';
 import { decodePackFile } from '../pack-file.mjs';
 import { validatePackOptions } from '../pack-input-v2.mjs';
+import { MATCHING_ADDON_BUILD_INFO_SOURCE } from './support/fake-addon.mjs';
 
 const PACKAGE_DIRECTORY = fileURLToPath(new URL('..', import.meta.url));
 const TIME_LIMIT_MESSAGE = 'The native trace passed its time limit of 1 s after 3 of 8 samples.';
@@ -160,6 +161,7 @@ test('traceNative passes an addon time limit error on with its code', () => {
     const fakeAddon = join(directory, 'fake-addon.cjs');
     writeFileSync(fakeAddon, `
       module.exports = {
+        ${MATCHING_ADDON_BUILD_INFO_SOURCE},
         traceSceneCycles() {
           const error = new Error(${JSON.stringify(TIME_LIMIT_MESSAGE)});
           error.code = 'GenericFailure';
