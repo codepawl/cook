@@ -1190,6 +1190,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
       }
 
+      lgt_path_bounce = bounce;
       let segment_end_t = select(surface_hit.t, volume_scatter_t, volume_scattered);
       let analytic_emission = lgt_eval_analytic_lights_along_segment(
         ray_origin,

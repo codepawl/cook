@@ -33,6 +33,9 @@ fn lgt_empty_sample() -> LgtDirectSample {
 // Shading point of the last surface bounce, kept for the MIS weight of the next hit. `lgt_mis_picked_by_tree` is false after a
 // volume scatter, whose direct light is picked from the flat analytic table.
 var<private> lgt_mis_picked_by_tree: bool = false;
+// Index of the path vertex the integrator is working at (0 at the camera hit), set once per path step. Per-light bounce limits
+// read it: `lgt_bounce_limit_allows` for a light sample, `lgt_hit_vertex_bounce` for a ray that reached a light.
+var<private> lgt_path_bounce: u32 = 0u;
 var<private> lgt_mis_position: vec3<f32> = vec3<f32>(0.0);
 var<private> lgt_mis_normal: vec3<f32> = vec3<f32>(0.0, 0.0, 1.0);
 var<private> lgt_mis_has_transmission: bool = false;
@@ -657,6 +660,19 @@ fn lgt_sample_sun_light(light: LightRecord, rand_uv: vec2<f32>) -> LgtDirectSamp
   return out;
 }
 
+// `LightRecord.flags` bits 8..15 hold a Cycles per-light `max_bounces` as `limit + 1`; `0` means the scene limit only. A light with
+// limit L adds direct light at path vertices 0..L.
+fn lgt_bounce_limit_allows(light: LightRecord, vertex_bounce: u32) -> bool {
+  let limit_code = (light.flags >> LIGHT_BOUNCE_LIMIT_SHIFT) & LIGHT_BOUNCE_LIMIT_MASK;
+  return limit_code == 0u || vertex_bounce < limit_code;
+}
+
+// A ray that reaches a light was cast from the vertex before the one `lgt_path_bounce` names, and shares its MIS weight with that
+// vertex's light sample, so both must pass the same limit.
+fn lgt_hit_vertex_bounce() -> u32 {
+  return select(0u, lgt_path_bounce - 1u, lgt_path_bounce > 0u);
+}
+
 fn lgt_sample_analytic_light(
   shading_pos: vec3<f32>,
   receiver_lo: u32,
@@ -686,6 +702,9 @@ fn lgt_sample_analytic_light_at(
     return lgt_empty_sample();
   }
   if (!lgt_links_match(receiver_lo, receiver_hi, light.light_group_mask_lo, light.light_group_mask_hi)) {
+    return lgt_empty_sample();
+  }
+  if (!lgt_bounce_limit_allows(light, lgt_path_bounce)) {
     return lgt_empty_sample();
   }
   if (light.light_type == LIGHT_TYPE_POINT || light.light_type == LIGHT_TYPE_SPOT) {
@@ -1057,6 +1076,9 @@ fn lgt_eval_analytic_lights_along_segment(
       if (!lgt_links_match(receiver_lo, receiver_hi, light.light_group_mask_lo, light.light_group_mask_hi)) {
         continue;
       }
+      if (!lgt_bounce_limit_allows(light, lgt_hit_vertex_bounce())) {
+        continue;
+      }
     }
 
     if (light.light_type == LIGHT_TYPE_POINT || light.light_type == LIGHT_TYPE_SPOT) {
@@ -1239,6 +1261,9 @@ fn lgt_eval_escaped_ray(
         continue;
       }
       if (!lgt_links_match(receiver_lo, receiver_hi, light.light_group_mask_lo, light.light_group_mask_hi)) {
+        continue;
+      }
+      if (!lgt_bounce_limit_allows(light, lgt_hit_vertex_bounce())) {
         continue;
       }
     }
