@@ -351,7 +351,12 @@ pub struct NativeTraceResult {
     pub backend: String,
     /// "EXPERIMENTAL_RAY_QUERY" when the device the trace ran on was opened with ray queries (the tracer needs them).
     pub features: String,
+    /// What the on-disk pipeline cache did when the device opened: "warm" (a file from an earlier process was loaded, so a
+    /// kernel variant it holds skips the compile), "cold" (enabled, nothing stored yet), "off" (`COOK_PIPELINE_CACHE=off`
+    /// or no per-user folder) or "unsupported" (the adapter has no pipeline caches). `compileSeconds` is what the compile cost.
+    pub pipeline_cache: String,
     pub setup_seconds: f64,
+    /// What this call spent compiling the kernel pipeline, apart from `tracedSeconds`. 0 when the session already held it.
     pub compile_seconds: f64,
     pub upload_seconds: f64,
     pub acceleration_build_seconds: f64,
@@ -428,6 +433,7 @@ pub fn trace_scene(input: NativeTraceInput, options: NativeTraceOptions) -> Resu
             adapter: prepared.adapter_name,
             backend: prepared.backend_name,
             features: prepared.features,
+            pipeline_cache: "off".to_string(),
             setup_seconds: prepared.setup_seconds,
             compile_seconds: prepared.compile_seconds,
             upload_seconds: prepared.upload_seconds,
@@ -603,6 +609,7 @@ fn session_render_result(
         adapter: context.adapter_name.clone(),
         backend: context.backend_name.clone(),
         features: context.features.clone(),
+        pipeline_cache: context.pipeline_cache.to_string(),
         setup_seconds: render.report.setup_seconds,
         compile_seconds: render.report.compile_seconds,
         upload_seconds: render.report.upload_seconds,

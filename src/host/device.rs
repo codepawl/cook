@@ -138,9 +138,11 @@ pub(crate) fn open_device() -> Result<(wgpu::Device, wgpu::Queue, wgpu::AdapterI
         return Err(failure(missing_ray_query_message(&adapter_info.name, adapter_info.device_type)));
     }
     let required_limits = required_device_limits(&adapter.limits());
+    // Pipeline caches are optional: without them every process compiles each kernel variant again.
+    let required_features = wgpu::Features::EXPERIMENTAL_RAY_QUERY | (adapter.features() & wgpu::Features::PIPELINE_CACHE);
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("render-native"),
-        required_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY,
+        required_features,
         required_limits,
         experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
         ..Default::default()
