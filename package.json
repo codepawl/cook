@@ -1,6 +1,6 @@
 {
   "name": "@codepawlhq/cook",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Cook: a hardware ray traced path tracer on wgpu and Vulkan ray queries, with a Cycles-parity kernel, a scene pack format and a command line.",
   "type": "module",
   "main": "./index.mjs",
